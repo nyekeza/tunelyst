@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.Tunelyst" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#FFD42A</item>
+        <item name="android:colorBackground">#000000</item>
+        <item name="android:windowBackground">@drawable/tunelyst_pre31_splash</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

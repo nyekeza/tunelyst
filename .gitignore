@@ -1,0 +1,22 @@
+*.iml
+.gradle/
+.kotlin/
+/local.properties
+/.idea/
+/build/
+/app/build/
+.DS_Store
+# Local build outputs and packaged APKs
+*.apk
+*.aab
+
+# Local signing material (never commit release credentials)
+*.jks
+*.jceks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+key.properties
+local-signing/
