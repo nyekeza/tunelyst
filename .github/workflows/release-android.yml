@@ -1,0 +1,200 @@
+name: Build and publish Android release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Check tag and release note
+        id: release-info
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          if [[ -z "$version" ]]; then
+            echo "::error::Could not read the app version from app/build.gradle.kts."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match app version $version."
+            exit 1
+          fi
+
+          note_file="docs/releases/$version.md"
+          if [[ ! -f "$note_file" ]] || [[ "$(head -n 1 "$note_file")" != "# Tunelyst $version" ]]; then
+            echo "::error::Add a brief release note at $note_file before tagging this version."
+            exit 1
+          fi
+
+          mapfile -t note_files < <(find docs/releases -maxdepth 1 -type f -name '*.md' -print | sort)
+          if [[ ${#note_files[@]} -ne 1 || "${note_files[0]:-}" != "$note_file" ]]; then
+            echo "::error::Keep only the current version's release note in docs/releases."
+            exit 1
+          fi
+
+          notes_body="$RUNNER_TEMP/release-notes.md"
+          awk 'NR > 2 { print }' "$note_file" > "$notes_body"
+          if [[ ! -s "$notes_body" ]]; then
+            echo "::error::The release note is empty."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "notes_body=$notes_body" >> "$GITHUB_OUTPUT"
+
+      - name: Check signing secrets
+        shell: bash
+        env:
+          TUNELYST_RELEASE_KEYSTORE_BASE64: ${{ secrets.TUNELYST_RELEASE_KEYSTORE_BASE64 }}
+          TUNELYST_RELEASE_STORE_PASSWORD: ${{ secrets.TUNELYST_RELEASE_STORE_PASSWORD }}
+          TUNELYST_RELEASE_KEY_ALIAS: ${{ secrets.TUNELYST_RELEASE_KEY_ALIAS }}
+          TUNELYST_RELEASE_KEY_PASSWORD: ${{ secrets.TUNELYST_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TUNELYST_RELEASE_KEYSTORE_BASE64:-}" || \
+                -z "${TUNELYST_RELEASE_STORE_PASSWORD:-}" || \
+                -z "${TUNELYST_RELEASE_KEY_ALIAS:-}" || \
+                -z "${TUNELYST_RELEASE_KEY_PASSWORD:-}" ]]; then
+            echo "::error::Add all four TUNELYST_RELEASE_* secrets in Settings > Environments > production."
+            exit 1
+          fi
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Restore production signing key
+        shell: bash
+        env:
+          TUNELYST_RELEASE_KEYSTORE_BASE64: ${{ secrets.TUNELYST_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          keystore="$RUNNER_TEMP/tunelyst-release.jks"
+          printf '%s' "$TUNELYST_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          test -s "$keystore"
+          printf 'TUNELYST_RELEASE_STORE_FILE=%s\n' "$keystore" >> "$GITHUB_ENV"
+
+      - name: Build production-signed APK
+        env:
+          TUNELYST_RELEASE_STORE_PASSWORD: ${{ secrets.TUNELYST_RELEASE_STORE_PASSWORD }}
+          TUNELYST_RELEASE_KEY_ALIAS: ${{ secrets.TUNELYST_RELEASE_KEY_ALIAS }}
+          TUNELYST_RELEASE_KEY_PASSWORD: ${{ secrets.TUNELYST_RELEASE_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Verify and name APK
+        shell: bash
+        env:
+          VERSION: ${{ steps.release-info.outputs.version }}
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/release/app-release.apk"
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          test -f "$apk"
+
+          "$build_tools/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/apksigner.txt"
+          expected_cert="ea0a6f4ab28384d68278040fb4a0d34f75ca9667478a3ef20048cab7f9de2f47"
+          actual_cert="$(sed -nE 's/.*certificate SHA-256 digest: ([[:xdigit:]:]+).*/\1/p' "$RUNNER_TEMP/apksigner.txt" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if [[ "$actual_cert" != "$expected_cert" ]]; then
+            echo "::error::The APK was signed with a different certificate than the approved Tunelyst release key."
+            exit 1
+          fi
+
+          "$build_tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
+          grep -Fq "package: name='com.tunelyst.music'" "$RUNNER_TEMP/apk-badging.txt"
+          grep -Fq "versionName='$VERSION'" "$RUNNER_TEMP/apk-badging.txt"
+          "$build_tools/zipalign" -c -P 16 -v 4 "$apk"
+          python3 scripts/check_apk_compatibility.py "$apk"
+          cp "$apk" "$RUNNER_TEMP/Tunelyst-$VERSION-release.apk"
+
+      - name: Package source archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.release-info.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/Tunelyst-$VERSION-source.zip"
+          git archive --format=zip --output="$archive" "$GITHUB_SHA"
+          unzip -tqq "$archive"
+          python3 - "$archive" "$VERSION" <<'PY'
+          import sys
+          import zipfile
+
+          archive_path, version = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(archive_path) as archive:
+              names = archive.namelist()
+              notes = [name for name in names if name.startswith("docs/releases/") and name.endswith(".md")]
+              if notes != [f"docs/releases/{version}.md"]:
+                  raise SystemExit(f"Unexpected release-note files in source archive: {notes}")
+              forbidden = [
+                  name for name in names
+                  if name.lower().endswith((".apk", ".aab", ".jks", ".jceks", ".keystore", ".p12", ".pfx", ".pem", ".key"))
+              ]
+              if forbidden:
+                  raise SystemExit(f"Signing or build files found in source archive: {forbidden}")
+          PY
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release-info.outputs.version }}
+          NOTES_BODY: ${{ steps.release-info.outputs.notes_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          title="Tunelyst $VERSION"
+          apk="$RUNNER_TEMP/Tunelyst-$VERSION-release.apk"
+          source_zip="$RUNNER_TEMP/Tunelyst-$VERSION-source.zip"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$apk" "$source_zip" --clobber
+            gh release edit "$tag" --draft=false --title "$title" --notes-file "$NOTES_BODY" --latest
+          else
+            gh release create "$tag" "$apk" "$source_zip" \
+              --title "$title" \
+              --notes-file "$NOTES_BODY" \
+              --latest \
+              --verify-tag
+          fi
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/tunelyst-release.jks"
