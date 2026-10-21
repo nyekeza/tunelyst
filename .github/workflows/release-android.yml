@@ -98,7 +98,7 @@ jobs:
           fi
 
       - name: Run unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest
+        run: bash ./gradlew --no-daemon testDebugUnitTest
 
       - name: Restore production signing key
         shell: bash
@@ -117,7 +117,7 @@ jobs:
           TUNELYST_RELEASE_STORE_PASSWORD: ${{ secrets.TUNELYST_RELEASE_STORE_PASSWORD }}
           TUNELYST_RELEASE_KEY_ALIAS: ${{ secrets.TUNELYST_RELEASE_KEY_ALIAS }}
           TUNELYST_RELEASE_KEY_PASSWORD: ${{ secrets.TUNELYST_RELEASE_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon assembleRelease
+        run: bash ./gradlew --no-daemon assembleRelease
 
       - name: Verify and name APK
         shell: bash
