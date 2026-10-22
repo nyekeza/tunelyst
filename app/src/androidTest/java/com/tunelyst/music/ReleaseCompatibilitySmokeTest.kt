@@ -75,7 +75,9 @@ class ReleaseCompatibilitySmokeTest {
             val controller = controllerFuture.get(30, TimeUnit.SECONDS)
             assertTrue(controller.isConnected)
         } finally {
-            MediaController.releaseFuture(controllerFuture)
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                MediaController.releaseFuture(controllerFuture)
+            }
         }
     }
 }
