@@ -86,27 +86,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncomingAudioIntent(incoming: Intent?) {
-        if (incoming == null || incoming.action !in AUDIO_INTENT_ACTIONS) return
-        val sharedUris = linkedSetOf<Uri>()
-
-        fun addSharedValue(value: Any?) {
-            when (value) {
-                is Uri -> sharedUris += value
-                is String -> runCatching { Uri.parse(value) }.getOrNull()?.let(sharedUris::add)
-                is Iterable<*> -> value.forEach { addSharedValue(it) }
-                is Array<*> -> value.forEach { addSharedValue(it) }
-            }
-        }
-
-        // EXTRA_STREAM is the standard share contract, but several file managers only populate
-        // data or ClipData. Collect all forms so a single share action cannot silently lose audio.
-        runCatching { incoming.extras?.get(Intent.EXTRA_STREAM) }.getOrNull()?.let { addSharedValue(it) }
-        incoming.data?.let(sharedUris::add)
-        incoming.clipData?.let { clip ->
-            for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(sharedUris::add)
-        }
-
-        val readableUris = sharedUris.filter { it.scheme == "content" || it.scheme == "file" }
+        if (incoming == null) return
+        val readableUris = IncomingAudioIntentParser.collect(incoming)
         if (readableUris.isEmpty()) return
 
         val hasReadGrant = incoming.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0
@@ -132,7 +113,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_OPEN_NOW_PLAYING = "com.tunelyst.music.action.OPEN_NOW_PLAYING"
-        private val AUDIO_INTENT_ACTIONS = setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE, Intent.ACTION_VIEW)
     }
 }
 

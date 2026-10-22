@@ -135,6 +135,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
+    // The wavy progress ring uses the Material 3 expressive API; stable 1.4.0 does not include it.
     implementation("androidx.compose.material3:material3:1.5.0-alpha18")
     implementation("androidx.compose.material:material-icons-core")
     // Keep only the icon classes this app uses, avoiding the full 36 MB extended icon archive.

@@ -5,10 +5,12 @@ Tunelyst is an Android app. To build it, use **JDK 21** with Android SDK **36** 
 Open the project in Android Studio, or run the tests and make a debug app with:
 
 ```bash
-bash ./gradlew :app:testDebugUnitTest :app:assembleDebug
+bash ./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
 ```
 
 The debug app is saved at `app/build/outputs/apk/debug/app-debug.apk`. It is for testing, not for public release.
+
+Before a public release, use the [device test checklist](device-test-checklist.md) to check playback and library changes on real phones.
 
 ## Publishing a release
 
