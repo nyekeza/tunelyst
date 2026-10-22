@@ -27,10 +27,13 @@ data class HomeMixCacheSnapshot(
     val lessLikeArtistsFingerprint: Long,
     val lessLikeGenresFingerprint: Long,
     val recentlyAddedSongIds: List<Long>,
-    val mixes: List<CachedHomeMix>
+    val mixes: List<CachedHomeMix>,
+    val bestOfArtists: List<CachedHomeMix> = emptyList(),
+    /** False only when loading a cache written before best-of-artist mixes were saved. */
+    val hasBestOfArtists: Boolean = true
 )
 
-/** A tiny, crash-safe cache so Home can render its existing mixes before recomputing them. */
+/** A tiny, crash-safe cache so Home can render its existing shelves before recomputing them. */
 class HomeMixCache(context: Context) {
     private val atomicFile = AtomicFile(File(context.applicationContext.cacheDir, "tunelyst-home-mixes.bin"))
 
@@ -38,48 +41,7 @@ class HomeMixCache(context: Context) {
     fun readSnapshot(): HomeMixCacheSnapshot? {
         if (!atomicFile.baseFile.exists()) return null
         return runCatching {
-            DataInputStream(BufferedInputStream(atomicFile.openRead())).use { input ->
-                require(input.readInt() == MAGIC)
-                require(input.readInt() == SCHEMA_VERSION)
-                val catalogSavedAtMs = input.readLong().coerceAtLeast(0L)
-                val genresLoaded = input.readBoolean()
-                val rotationDay = input.readLong()
-                val favoritesFingerprint = input.readLong()
-                val recentlyPlayedFingerprint = input.readLong()
-                val hiddenSongsFingerprint = input.readLong()
-                val playCountsFingerprint = input.readLong()
-                val lessLikeArtistsFingerprint = input.readLong()
-                val lessLikeGenresFingerprint = input.readLong()
-                val recentlyAddedCount = input.readInt()
-                require(recentlyAddedCount in 0..MAX_RECENTLY_ADDED)
-                val recentlyAdded = List(recentlyAddedCount) { input.readLong() }
-                val mixCount = input.readInt()
-                require(mixCount in 0..MAX_MIXES)
-                val mixes = ArrayList<CachedHomeMix>(mixCount)
-                repeat(mixCount) {
-                    val title = input.readUTF()
-                    val description = input.readUTF()
-                    val songCount = input.readInt()
-                    require(songCount in 0..MAX_TRACKS_PER_MIX)
-                    val songIds = List(songCount) { input.readLong() }.distinct()
-                    if (title.isNotBlank() && songIds.isNotEmpty()) {
-                        mixes += CachedHomeMix(title, description, songIds)
-                    }
-                }
-                HomeMixCacheSnapshot(
-                    catalogSavedAtMs = catalogSavedAtMs,
-                    genresLoaded = genresLoaded,
-                    rotationDay = rotationDay,
-                    favoritesFingerprint = favoritesFingerprint,
-                    recentlyPlayedFingerprint = recentlyPlayedFingerprint,
-                    hiddenSongsFingerprint = hiddenSongsFingerprint,
-                    playCountsFingerprint = playCountsFingerprint,
-                    lessLikeArtistsFingerprint = lessLikeArtistsFingerprint,
-                    lessLikeGenresFingerprint = lessLikeGenresFingerprint,
-                    recentlyAddedSongIds = recentlyAdded,
-                    mixes = mixes
-                )
-            }
+            DataInputStream(BufferedInputStream(atomicFile.openRead())).use(HomeMixCacheCodec::read)
         }.getOrNull()
     }
 
@@ -90,36 +52,7 @@ class HomeMixCache(context: Context) {
             val outputStream = atomicFile.startWrite()
             stream = outputStream
             val output = DataOutputStream(BufferedOutputStream(outputStream))
-            val recentlyAdded = snapshot.recentlyAddedSongIds.distinct().take(MAX_RECENTLY_ADDED)
-            val mixes = snapshot.mixes
-                .asSequence()
-                .filter { it.title.isNotBlank() }
-                .distinctBy(CachedHomeMix::title)
-                .take(MAX_MIXES)
-                .map { mix -> mix.copy(songIds = mix.songIds.distinct().take(MAX_TRACKS_PER_MIX)) }
-                .filter { it.songIds.isNotEmpty() }
-                .toList()
-
-            output.writeInt(MAGIC)
-            output.writeInt(SCHEMA_VERSION)
-            output.writeLong(snapshot.catalogSavedAtMs.coerceAtLeast(0L))
-            output.writeBoolean(snapshot.genresLoaded)
-            output.writeLong(snapshot.rotationDay)
-            output.writeLong(snapshot.favoritesFingerprint)
-            output.writeLong(snapshot.recentlyPlayedFingerprint)
-            output.writeLong(snapshot.hiddenSongsFingerprint)
-            output.writeLong(snapshot.playCountsFingerprint)
-            output.writeLong(snapshot.lessLikeArtistsFingerprint)
-            output.writeLong(snapshot.lessLikeGenresFingerprint)
-            output.writeInt(recentlyAdded.size)
-            recentlyAdded.forEach(output::writeLong)
-            output.writeInt(mixes.size)
-            mixes.forEach { mix ->
-                output.writeUTF(mix.title.take(MAX_TEXT_LENGTH))
-                output.writeUTF(mix.description.take(MAX_TEXT_LENGTH))
-                output.writeInt(mix.songIds.size)
-                mix.songIds.forEach(output::writeLong)
-            }
+            HomeMixCacheCodec.write(output, snapshot)
             output.flush()
             atomicFile.finishWrite(outputStream)
             stream = null
@@ -128,14 +61,119 @@ class HomeMixCache(context: Context) {
             throw error
         }
     }
+}
 
-    private companion object {
-        const val MAGIC = 0x4C4D4D58 // LMMX
-        const val SCHEMA_VERSION = 3
-        const val MAX_MIXES = 12
-        const val MAX_TRACKS_PER_MIX = 64
-        const val MAX_RECENTLY_ADDED = 16
-        const val MAX_TEXT_LENGTH = 512
+/** Pure serializer kept separate so the cache format can be tested without Android storage APIs. */
+internal object HomeMixCacheCodec {
+    private const val MAGIC = 0x4C4D4D58 // LMMX
+    private const val PREVIOUS_SCHEMA_VERSION = 3
+    private const val SCHEMA_VERSION = 4
+    private const val MAX_MIXES = 12
+    private const val MAX_BEST_OF_ARTISTS = 8
+    private const val MAX_TRACKS_PER_MIX = 64
+    private const val MAX_RECENTLY_ADDED = 16
+    private const val MAX_TEXT_LENGTH = 512
+
+    fun read(input: DataInputStream): HomeMixCacheSnapshot {
+        require(input.readInt() == MAGIC)
+        val schemaVersion = input.readInt()
+        require(schemaVersion in PREVIOUS_SCHEMA_VERSION..SCHEMA_VERSION)
+        val catalogSavedAtMs = input.readLong().coerceAtLeast(0L)
+        val genresLoaded = input.readBoolean()
+        val rotationDay = input.readLong()
+        val favoritesFingerprint = input.readLong()
+        val recentlyPlayedFingerprint = input.readLong()
+        val hiddenSongsFingerprint = input.readLong()
+        val playCountsFingerprint = input.readLong()
+        val lessLikeArtistsFingerprint = input.readLong()
+        val lessLikeGenresFingerprint = input.readLong()
+        val recentlyAddedCount = input.readInt()
+        require(recentlyAddedCount in 0..MAX_RECENTLY_ADDED)
+        val recentlyAdded = List(recentlyAddedCount) { input.readLong() }
+        val mixes = readMixes(input, MAX_MIXES)
+        val hasBestOfArtists = schemaVersion >= SCHEMA_VERSION && input.readBoolean()
+        val bestOfArtists = if (schemaVersion >= SCHEMA_VERSION) {
+            readMixes(input, MAX_BEST_OF_ARTISTS)
+        } else {
+            emptyList()
+        }
+
+        return HomeMixCacheSnapshot(
+            catalogSavedAtMs = catalogSavedAtMs,
+            genresLoaded = genresLoaded,
+            rotationDay = rotationDay,
+            favoritesFingerprint = favoritesFingerprint,
+            recentlyPlayedFingerprint = recentlyPlayedFingerprint,
+            hiddenSongsFingerprint = hiddenSongsFingerprint,
+            playCountsFingerprint = playCountsFingerprint,
+            lessLikeArtistsFingerprint = lessLikeArtistsFingerprint,
+            lessLikeGenresFingerprint = lessLikeGenresFingerprint,
+            recentlyAddedSongIds = recentlyAdded,
+            mixes = mixes,
+            bestOfArtists = bestOfArtists,
+            hasBestOfArtists = hasBestOfArtists
+        )
+    }
+
+    fun write(output: DataOutputStream, snapshot: HomeMixCacheSnapshot) {
+        val recentlyAdded = snapshot.recentlyAddedSongIds.distinct().take(MAX_RECENTLY_ADDED)
+        output.writeInt(MAGIC)
+        output.writeInt(SCHEMA_VERSION)
+        output.writeLong(snapshot.catalogSavedAtMs.coerceAtLeast(0L))
+        output.writeBoolean(snapshot.genresLoaded)
+        output.writeLong(snapshot.rotationDay)
+        output.writeLong(snapshot.favoritesFingerprint)
+        output.writeLong(snapshot.recentlyPlayedFingerprint)
+        output.writeLong(snapshot.hiddenSongsFingerprint)
+        output.writeLong(snapshot.playCountsFingerprint)
+        output.writeLong(snapshot.lessLikeArtistsFingerprint)
+        output.writeLong(snapshot.lessLikeGenresFingerprint)
+        output.writeInt(recentlyAdded.size)
+        recentlyAdded.forEach(output::writeLong)
+        writeMixes(output, snapshot.mixes, MAX_MIXES)
+        output.writeBoolean(snapshot.hasBestOfArtists)
+        writeMixes(output, snapshot.bestOfArtists, MAX_BEST_OF_ARTISTS)
+    }
+
+    private fun readMixes(input: DataInputStream, maximumCount: Int): List<CachedHomeMix> {
+        val mixCount = input.readInt()
+        require(mixCount in 0..maximumCount)
+        return buildList(mixCount) {
+            repeat(mixCount) {
+                val title = input.readUTF()
+                val description = input.readUTF()
+                val songCount = input.readInt()
+                require(songCount in 0..MAX_TRACKS_PER_MIX)
+                val songIds = List(songCount) { input.readLong() }.distinct()
+                if (title.isNotBlank() && songIds.isNotEmpty()) {
+                    add(CachedHomeMix(title, description, songIds))
+                }
+            }
+        }
+    }
+
+    private fun writeMixes(output: DataOutputStream, values: List<CachedHomeMix>, maximumCount: Int) {
+        val mixes = values.asSequence()
+            .filter { it.title.isNotBlank() }
+            .distinctBy(CachedHomeMix::title)
+            .take(maximumCount)
+            .map { mix ->
+                mix.copy(
+                    title = mix.title.take(MAX_TEXT_LENGTH),
+                    description = mix.description.take(MAX_TEXT_LENGTH),
+                    songIds = mix.songIds.distinct().take(MAX_TRACKS_PER_MIX)
+                )
+            }
+            .filter { it.songIds.isNotEmpty() }
+            .toList()
+
+        output.writeInt(mixes.size)
+        mixes.forEach { mix ->
+            output.writeUTF(mix.title)
+            output.writeUTF(mix.description)
+            output.writeInt(mix.songIds.size)
+            mix.songIds.forEach(output::writeLong)
+        }
     }
 }
 

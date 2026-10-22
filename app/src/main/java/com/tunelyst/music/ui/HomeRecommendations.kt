@@ -1,5 +1,7 @@
 package com.tunelyst.music.ui
 
+import com.tunelyst.music.data.CachedHomeMix
+import com.tunelyst.music.data.HomeMixCacheSnapshot
 import com.tunelyst.music.data.Song
 import com.tunelyst.music.data.normalizeTasteKey
 import com.tunelyst.music.data.normalizedGenreKeys
@@ -19,6 +21,34 @@ data class HomeRecommendations(
     val mixes: List<MadeForYouMix>,
     val bestOfArtists: List<MadeForYouMix> = emptyList()
 )
+
+/** Restores a cached shelf from current library entries without rebuilding recommendation rankings. */
+fun restoreHomeRecommendationsFromCache(
+    cache: HomeMixCacheSnapshot?,
+    songLookup: Map<Long, Song>,
+    hiddenHomeSongIds: Set<Long>
+): HomeRecommendations? {
+    if (cache == null || songLookup.isEmpty()) return null
+
+    fun resolve(ids: List<Long>): List<Song> = ids.distinct().mapNotNull { id ->
+        if (id in hiddenHomeSongIds) null else songLookup[id]
+    }
+
+    fun restoreMixes(cachedMixes: List<CachedHomeMix>): List<MadeForYouMix> = cachedMixes.mapNotNull { cachedMix ->
+        resolve(cachedMix.songIds)
+            .takeIf { it.isNotEmpty() }
+            ?.let { MadeForYouMix(cachedMix.title, cachedMix.description, it) }
+    }
+
+    val recommendations = HomeRecommendations(
+        recentlyAdded = resolve(cache.recentlyAddedSongIds),
+        mixes = restoreMixes(cache.mixes),
+        bestOfArtists = restoreMixes(cache.bestOfArtists)
+    )
+    return recommendations.takeIf {
+        it.recentlyAdded.isNotEmpty() || it.mixes.isNotEmpty() || it.bestOfArtists.isNotEmpty()
+    }
+}
 
 fun homeMixCardId(title: String): String = "mix:$title"
 

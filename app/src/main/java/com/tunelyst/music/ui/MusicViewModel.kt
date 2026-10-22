@@ -67,6 +67,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -168,6 +171,38 @@ private class HomeRecommendationInputKey(
         lessLikeArtistsFingerprint.hashCode() * 3 + lessLikeGenresFingerprint.hashCode() +
         catalogSavedAtMs.hashCode() + genresLoaded.hashCode() + rotationDay.hashCode()
 }
+
+private data class HomeRecommendationInputSnapshot(
+    val isLibraryReady: Boolean,
+    val songs: List<Song>,
+    val favorites: Set<Long>,
+    val recentlyPlayedIds: List<Long>,
+    val playCounts: Map<Long, Long>,
+    val lessLikeArtistNames: Set<String>,
+    val lessLikeGenreNames: Set<String>,
+    val hiddenHomeSongIds: Set<Long>,
+    val catalogSavedAtMs: Long,
+    val genresLoaded: Boolean,
+    val rotationDay: Long
+) {
+    fun hasSameInputsAs(other: HomeRecommendationInputSnapshot): Boolean =
+        isLibraryReady == other.isLibraryReady &&
+            songs === other.songs &&
+            favorites == other.favorites &&
+            recentlyPlayedIds == other.recentlyPlayedIds &&
+            playCounts == other.playCounts &&
+            lessLikeArtistNames == other.lessLikeArtistNames &&
+            lessLikeGenreNames == other.lessLikeGenreNames &&
+            hiddenHomeSongIds == other.hiddenHomeSongIds &&
+            catalogSavedAtMs == other.catalogSavedAtMs &&
+            genresLoaded == other.genresLoaded &&
+            rotationDay == other.rotationDay
+}
+
+private data class HomeRecommendationObservation(
+    val state: MusicUiState,
+    val inputs: HomeRecommendationInputSnapshot
+)
 
 data class PlaybackUiState(
     val currentSong: Song? = null,
@@ -507,16 +542,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
             val currentState = _uiState.value
             val rotationDay = LocalDate.now().toEpochDay()
-            val cachedRecommendations = restoreHomeRecommendationsFromCache(
-                cache = restored.homeMixCacheSnapshot,
-                songLookup = restored.songLookup,
-                state = currentState,
-                savedAtMs = catalogSavedAtMs,
-                genresLoaded = catalogGenresLoaded,
-                rotationDay = rotationDay
-            )
-            if (cachedRecommendations != null) {
-                homeRecommendationInputKey = createHomeRecommendationInputKey(
+            val (cachedRecommendations, freshCacheKey) = withContext(Dispatchers.Default) {
+                val inputKey = createHomeRecommendationInputKey(
                     songs = restored.songs,
                     favorites = currentState.favorites,
                     recentlyPlayedIds = currentState.recentlyPlayedIds,
@@ -528,7 +555,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     genresLoaded = catalogGenresLoaded,
                     rotationDay = rotationDay
                 )
+                val recommendations = restoreHomeRecommendationsFromCache(
+                    cache = restored.homeMixCacheSnapshot,
+                    songLookup = restored.songLookup,
+                    hiddenHomeSongIds = currentState.hiddenHomeSongIds
+                )
+                val currentCache = restored.homeMixCacheSnapshot
+                val cacheIsCurrent = isHomeRecommendationCacheCurrent(
+                    cache = currentCache,
+                    inputKey = inputKey,
+                    songLookup = restored.songLookup,
+                    hiddenHomeSongIds = currentState.hiddenHomeSongIds
+                )
+                recommendations to inputKey.takeIf { cacheIsCurrent && recommendations != null }
             }
+            homeRecommendationInputKey = freshCacheKey
             _uiState.update {
                 it.copy(
                     songs = restored.songs,
@@ -560,30 +601,59 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun observeHomeRecommendations() {
         viewModelScope.launch {
-            _uiState.collect(::scheduleHomeRecommendations)
+            _uiState
+                .map { state ->
+                    HomeRecommendationObservation(
+                        state = state,
+                        inputs = HomeRecommendationInputSnapshot(
+                            isLibraryReady = state.isLibraryReady,
+                            songs = state.songs,
+                            favorites = state.favorites,
+                            recentlyPlayedIds = state.recentlyPlayedIds,
+                            playCounts = state.playCounts,
+                            lessLikeArtistNames = state.lessLikeArtistNames,
+                            lessLikeGenreNames = state.lessLikeGenreNames,
+                            hiddenHomeSongIds = state.hiddenHomeSongIds,
+                            catalogSavedAtMs = catalogSavedAtMs,
+                            genresLoaded = catalogGenresLoaded,
+                            rotationDay = LocalDate.now().toEpochDay()
+                        )
+                    )
+                }
+                .distinctUntilChanged { previous, current ->
+                    previous.inputs.hasSameInputsAs(current.inputs)
+                }
+                .flowOn(Dispatchers.Default)
+                .collect { observation ->
+                    if (observation.inputs.isLibraryReady) scheduleHomeRecommendations(observation.state)
+                }
         }
     }
 
-    private fun scheduleHomeRecommendations(state: MusicUiState) {
+    private suspend fun scheduleHomeRecommendations(state: MusicUiState) {
         if (!state.isLibraryReady) return
         val rotationDay = LocalDate.now().toEpochDay()
-        val key = createHomeRecommendationInputKey(
-            songs = state.songs,
-            favorites = state.favorites,
-            recentlyPlayedIds = state.recentlyPlayedIds,
-            playCounts = state.playCounts,
-            lessLikeArtistNames = state.lessLikeArtistNames,
-            lessLikeGenreNames = state.lessLikeGenreNames,
-            hiddenHomeSongIds = state.hiddenHomeSongIds,
-            savedAtMs = catalogSavedAtMs,
-            genresLoaded = catalogGenresLoaded,
-            rotationDay = rotationDay
-        )
+        val savedAtMs = catalogSavedAtMs
+        val genresLoaded = catalogGenresLoaded
+        val key = withContext(Dispatchers.Default) {
+            createHomeRecommendationInputKey(
+                songs = state.songs,
+                favorites = state.favorites,
+                recentlyPlayedIds = state.recentlyPlayedIds,
+                playCounts = state.playCounts,
+                lessLikeArtistNames = state.lessLikeArtistNames,
+                lessLikeGenreNames = state.lessLikeGenreNames,
+                hiddenHomeSongIds = state.hiddenHomeSongIds,
+                savedAtMs = savedAtMs,
+                genresLoaded = genresLoaded,
+                rotationDay = rotationDay
+            )
+        }
         if (key == homeRecommendationInputKey) return
         homeRecommendationInputKey = key
         homeRecommendationsJob?.cancel()
 
-        // Apply Home-only hiding immediately while the richer replacement mixes are computed.
+        // Keep any visible shelves, applying Home-only hiding while replacements are computed.
         state.homeRecommendations?.let { current ->
             val hidden = state.hiddenHomeSongIds
             val filtered = current.copy(
@@ -605,8 +675,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val lessLikeArtistNames = state.lessLikeArtistNames
         val lessLikeGenreNames = state.lessLikeGenreNames
         val hiddenHomeSongIds = state.hiddenHomeSongIds
-        val savedAtMs = catalogSavedAtMs
-        val genresLoaded = catalogGenresLoaded
         homeRecommendationsJob = viewModelScope.launch {
             val recommendations = withContext(Dispatchers.Default) {
                 buildHomeRecommendations(
@@ -637,6 +705,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 lessLikeGenresFingerprint = key.lessLikeGenresFingerprint,
                 recentlyAddedSongIds = recommendations.recentlyAdded.map(Song::id),
                 mixes = recommendations.mixes.map { mix ->
+                    CachedHomeMix(mix.title, mix.description, mix.songs.map(Song::id))
+                },
+                bestOfArtists = recommendations.bestOfArtists.map { mix ->
                     CachedHomeMix(mix.title, mix.description, mix.songs.map(Song::id))
                 }
             )
@@ -670,46 +741,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         rotationDay = rotationDay
     )
 
-    private fun restoreHomeRecommendationsFromCache(
+    private fun isHomeRecommendationCacheCurrent(
         cache: HomeMixCacheSnapshot?,
+        inputKey: HomeRecommendationInputKey,
         songLookup: Map<Long, Song>,
-        state: MusicUiState,
-        savedAtMs: Long,
-        genresLoaded: Boolean,
-        rotationDay: Long
-    ): HomeRecommendations? {
-        if (cache == null || savedAtMs <= 0L ||
-            cache.catalogSavedAtMs != savedAtMs ||
-            cache.genresLoaded != genresLoaded ||
-            cache.rotationDay != rotationDay ||
-            cache.favoritesFingerprint != homeMixSetFingerprint(state.favorites) ||
-            cache.recentlyPlayedFingerprint != homeMixOrderedIdFingerprint(state.recentlyPlayedIds) ||
-            cache.hiddenSongsFingerprint != homeMixSetFingerprint(state.hiddenHomeSongIds) ||
-            cache.playCountsFingerprint != homeMixPlayCountsFingerprint(state.playCounts) ||
-            cache.lessLikeArtistsFingerprint != homeMixTasteNamesFingerprint(state.lessLikeArtistNames) ||
-            cache.lessLikeGenresFingerprint != homeMixTasteNamesFingerprint(state.lessLikeGenreNames)
-        ) return null
-        val cachedSongIds = cache.recentlyAddedSongIds + cache.mixes.flatMap(CachedHomeMix::songIds)
-        if (cachedSongIds.any { it !in songLookup || it in state.hiddenHomeSongIds }) return null
+        hiddenHomeSongIds: Set<Long>
+    ): Boolean {
+        if (cache == null || !cache.hasBestOfArtists || inputKey.catalogSavedAtMs <= 0L ||
+            cache.catalogSavedAtMs != inputKey.catalogSavedAtMs ||
+            cache.genresLoaded != inputKey.genresLoaded ||
+            cache.rotationDay != inputKey.rotationDay ||
+            cache.favoritesFingerprint != inputKey.favoritesFingerprint ||
+            cache.recentlyPlayedFingerprint != inputKey.recentlyPlayedFingerprint ||
+            cache.hiddenSongsFingerprint != inputKey.hiddenSongsFingerprint ||
+            cache.playCountsFingerprint != inputKey.playCountsFingerprint ||
+            cache.lessLikeArtistsFingerprint != inputKey.lessLikeArtistsFingerprint ||
+            cache.lessLikeGenresFingerprint != inputKey.lessLikeGenresFingerprint
+        ) return false
 
-        fun resolve(ids: List<Long>): List<Song> = ids.distinct().mapNotNull { id ->
-            if (id in state.hiddenHomeSongIds) null else songLookup[id]
-        }
-
-        val mixes = cache.mixes.mapNotNull { cachedMix ->
-            val mixSongs = resolve(cachedMix.songIds)
-            mixSongs.takeIf { it.isNotEmpty() }?.let { MadeForYouMix(cachedMix.title, cachedMix.description, it) }
-        }
-        return HomeRecommendations(
-            recentlyAdded = resolve(cache.recentlyAddedSongIds),
-            mixes = mixes,
-            bestOfArtists = buildBestOfArtistMixes(
-                songs = songLookup.values.toList(),
-                playCounts = state.playCounts,
-                hiddenHomeSongIds = state.hiddenHomeSongIds,
-                recentlyPlayedIds = state.recentlyPlayedIds
-            )
-        )
+        val cachedSongIds = cache.recentlyAddedSongIds +
+            cache.mixes.flatMap(CachedHomeMix::songIds) +
+            cache.bestOfArtists.flatMap(CachedHomeMix::songIds)
+        return cachedSongIds.all { songId -> songId in songLookup && songId !in hiddenHomeSongIds }
     }
 
     fun requestOpenNowPlaying() {
