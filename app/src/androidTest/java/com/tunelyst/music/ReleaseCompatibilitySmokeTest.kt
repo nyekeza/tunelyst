@@ -3,6 +3,7 @@ package com.tunelyst.music
 import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.test.core.app.ActivityScenario
@@ -63,6 +64,7 @@ class ReleaseCompatibilitySmokeTest {
         )
     }
 
+    @OptIn(UnstableApi::class)
     @Test
     fun playbackServiceAcceptsAMediaControllerConnection() {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext

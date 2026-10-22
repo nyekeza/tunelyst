@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,11 +13,14 @@ import org.junit.runner.RunWith
 class IncomingAudioIntentParserInstrumentedTest {
     @Test
     fun sendIntentCombinesStreamDataAndClipDataWithoutDuplicates() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
         val streamUri = Uri.parse("content://example.test/audio/1")
         val dataUri = Uri.parse("content://example.test/audio/2")
         val clipUri = Uri.parse("content://example.test/audio/3")
-        val clipData = ClipData.newUri(context.contentResolver, "shared audio", streamUri).apply {
+        val clipData = ClipData(
+            "shared audio",
+            arrayOf("audio/mpeg"),
+            ClipData.Item(streamUri)
+        ).apply {
             addItem(ClipData.Item(clipUri))
         }
         val intent = Intent(Intent.ACTION_SEND).apply {
