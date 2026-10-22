@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package com.tunelyst.music
 
 import android.content.ComponentName
@@ -15,6 +13,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
@@ -23,6 +22,7 @@ import com.tunelyst.music.ui.TunelystMusicApp
 import com.tunelyst.music.ui.MusicViewModel
 import java.util.concurrent.Executor
 
+@OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
     private val musicViewModel: MusicViewModel by viewModels {
         MusicViewModelFactory(application)

@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package com.tunelyst.music.playback
 
 import android.app.PendingIntent
@@ -21,6 +19,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -36,6 +35,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /** Owns playback outside the Activity so music and media controls survive navigation/backgrounding. */
+@OptIn(UnstableApi::class)
 class MusicPlaybackService : MediaSessionService() {
     private lateinit var foregroundPlayer: ExoPlayer
     private lateinit var standbyPlayer: ExoPlayer
@@ -235,8 +235,10 @@ class MusicPlaybackService : MediaSessionService() {
         return standbyPlayer
     }
 
+    @OptIn(UnstableApi::class)
     private fun installListener(target: ExoPlayer) {
         val listener = object : Player.Listener {
+            @OptIn(UnstableApi::class)
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
                 if (audioSessionId > 0) audioSessionIds[target] = audioSessionId
                 else audioSessionIds.remove(target)
@@ -538,6 +540,7 @@ class MusicPlaybackService : MediaSessionService() {
         if (restoreVolume && ::foregroundPlayer.isInitialized) foregroundPlayer.volume = 1f
     }
 
+    @OptIn(UnstableApi::class)
     private fun prepareNextPlayer(nextIndex: Int) {
         val source = foregroundPlayer
         if (nextIndex !in 0 until source.mediaItemCount) return

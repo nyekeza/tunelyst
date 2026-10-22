@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package com.tunelyst.music.ui
 
 import android.Manifest
@@ -26,6 +24,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import com.tunelyst.music.data.AppSettingsState
 import com.tunelyst.music.data.AppSettingsStore
 import com.tunelyst.music.data.AppThemeMode
@@ -205,6 +204,7 @@ private data class HomeRecommendationObservation(
     val inputs: HomeRecommendationInputSnapshot
 )
 
+@OptIn(UnstableApi::class)
 data class PlaybackUiState(
     val currentSong: Song? = null,
     val isPlaying: Boolean = false,
@@ -226,6 +226,7 @@ data class PlaybackUiState(
     val lastPlaybackError: String? = null
 )
 
+@OptIn(UnstableApi::class)
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = MusicRepository(application)
     private val store = LibraryStore(application)
@@ -365,6 +366,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    @OptIn(UnstableApi::class)
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
             if (events.contains(Player.EVENT_REPEAT_MODE_CHANGED) &&
@@ -420,6 +422,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        @OptIn(UnstableApi::class)
         override fun onPositionDiscontinuity(
             oldPosition: Player.PositionInfo,
             newPosition: Player.PositionInfo,

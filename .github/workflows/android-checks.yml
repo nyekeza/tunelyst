@@ -41,6 +41,49 @@ jobs:
       - name: Run Android lint
         run: bash ./gradlew --no-daemon lintDebug
 
+      - name: Report Android lint errors
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import xml.etree.ElementTree as ET
+
+          reports = sorted(glob.glob("app/build/reports/lint-results*.xml"))
+          if not reports:
+              print("::warning title=Android lint report::No lint XML report was produced.")
+              raise SystemExit(0)
+
+          def escape_data(value):
+              return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          def escape_property(value):
+              return escape_data(value).replace(":", "%3A").replace(",", "%2C")
+
+          for report in reports:
+              root = ET.parse(report).getroot()
+              for issue in root.iter("issue"):
+                  severity = issue.attrib.get("severity", "warning").lower()
+                  if severity not in ("error", "fatal"):
+                      continue
+                  location = issue.find("location")
+                  if location is None:
+                      continue
+                  source = location.attrib.get("file")
+                  if not source:
+                      continue
+                  if os.path.isabs(source):
+                      source = os.path.relpath(source, os.getcwd())
+                  line = location.attrib.get("line")
+                  message = issue.attrib.get("message", issue.attrib.get("id", "Android lint error"))
+                  title = issue.attrib.get("id", "Android lint")
+                  properties = f"file={escape_property(source)},title={escape_property(title)}"
+                  if line:
+                      properties += f",line={escape_property(line)}"
+                  print(f"::error {properties}::{escape_data(message)}")
+          PY
+
       - name: Run unit tests and build the debug app
         run: bash ./gradlew --no-daemon testDebugUnitTest assembleDebug
 
