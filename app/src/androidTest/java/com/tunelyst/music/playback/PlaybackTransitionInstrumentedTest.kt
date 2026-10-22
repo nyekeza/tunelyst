@@ -108,12 +108,27 @@ class PlaybackTransitionInstrumentedTest {
             )
             SystemClock.sleep(200L)
             assertEquals("transition-source", currentMediaId(instrumentation, activeController))
-            awaitCondition(instrumentation, "manual next did not finish") {
+            awaitCondition(
+                instrumentation,
+                "manual next did not finish",
+                diagnostics = {
+                    runOnMainSync(instrumentation) {
+                        "mediaId=${activeController.currentMediaItem?.mediaId}, " +
+                            "playWhenReady=${activeController.playWhenReady}, " +
+                            "isPlaying=${activeController.isPlaying}, " +
+                            "playbackState=${activeController.playbackState}, " +
+                            "position=${activeController.currentPosition}, " +
+                            "currentIndex=${activeController.currentMediaItemIndex}, " +
+                            "nextIndex=${activeController.nextMediaItemIndex}"
+                    }
+                }
+            ) {
                 currentMediaId(instrumentation, activeController) == "transition-next"
             }
+            val incomingPosition = currentPosition(instrumentation, activeController)
             assertTrue(
-                "incoming track position should show that it played during the crossfade",
-                currentPosition(instrumentation, activeController) >= 500L
+                "incoming track position should show that it played during the crossfade (position=$incomingPosition)",
+                incomingPosition >= 500L
             )
 
             val replacementItems = listOf(

@@ -838,16 +838,21 @@ class MusicPlaybackService : MediaSessionService() {
         manualFadeStartedAtElapsedMs = 0L
         standbyPlayer.volume = 0f
         standbyPlayer.play()
+        scheduleManualTransitionTimeout()
         resumeManualFadeClockIfPlaying()
     }
 
-    private fun scheduleManualTransitionTimeout() {
+    private fun scheduleManualTransitionTimeout(timeoutMs: Long = MANUAL_PREPARE_TIMEOUT_MS) {
         clearManualTransitionTimeout()
         val timeout = Runnable {
-            if (pendingManualTransition != null) applyPendingManualTransitionImmediately()
+            when {
+                pendingManualTransition != null -> applyPendingManualTransitionImmediately()
+                crossfading && crossfadeKind == CrossfadeKind.MANUAL && activeManualTransition != null ->
+                    applyActiveManualTransitionImmediately()
+            }
         }
         manualTransitionTimeout = timeout
-        mainHandler.postDelayed(timeout, MANUAL_PREPARE_TIMEOUT_MS)
+        mainHandler.postDelayed(timeout, timeoutMs)
     }
 
     private fun clearManualTransitionTimeout() {
@@ -864,6 +869,14 @@ class MusicPlaybackService : MediaSessionService() {
             cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = crossfading)
         }
         applyManualTransitionImmediately(request, restoreVolume = !sleepTimerFadeActive)
+    }
+
+    /** Complete a manual skip without a fade if the active overlap stalls before its fade clock ends. */
+    private fun applyActiveManualTransitionImmediately() {
+        val request = activeManualTransition ?: return
+        val restoreVolume = !sleepTimerFadeActive
+        cancelCrossfade(restoreVolume = restoreVolume)
+        applyManualTransitionImmediately(request, restoreVolume = restoreVolume)
     }
 
     private fun applyQueueToForeground(request: PlaybackTransitionRequest, restoreVolume: Boolean) {
@@ -898,9 +911,14 @@ class MusicPlaybackService : MediaSessionService() {
             !foregroundPlayer.isPlaying || !::standbyPlayer.isInitialized || !standbyPlayer.isPlaying
         ) return
         manualFadeStartedAtElapsedMs = SystemClock.elapsedRealtime()
+        val remainingFadeMs = (fadeDurationMs - manualFadeElapsedMs).coerceAtLeast(0L)
+        scheduleManualTransitionTimeout(remainingFadeMs + MANUAL_FADE_COMPLETION_GRACE_MS)
     }
 
     private fun pauseManualFadeClock() {
+        if (crossfadeKind == CrossfadeKind.MANUAL && activeManualTransition != null) {
+            clearManualTransitionTimeout()
+        }
         val startedAt = manualFadeStartedAtElapsedMs
         if (startedAt == 0L) return
         manualFadeElapsedMs += (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
@@ -1213,6 +1231,7 @@ class MusicPlaybackService : MediaSessionService() {
         const val CROSSFADE_CANCEL_RESTORE_TICK_MS = 16L
         const val CROSSFADE_CANCEL_RESTORE_DURATION_MS = 200L
         const val MANUAL_PREPARE_TIMEOUT_MS = 8_000L
+        const val MANUAL_FADE_COMPLETION_GRACE_MS = 3_000L
         const val TRANSIENT_PLAYBACK_RETRY_DELAY_MS = 400L
         const val UNEXPECTED_PAUSE_RECOVERY_DELAY_MS = 4_000L
         const val UNEXPECTED_PAUSE_RECOVERY_COOLDOWN_MS = 15_000L
