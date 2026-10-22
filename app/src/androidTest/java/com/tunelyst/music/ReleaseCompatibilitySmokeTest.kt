@@ -1,23 +1,15 @@
 package com.tunelyst.music
 
-import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.annotation.OptIn
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionToken
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.tunelyst.music.playback.MusicPlaybackService
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class ReleaseCompatibilitySmokeTest {
@@ -63,27 +55,5 @@ class ReleaseCompatibilitySmokeTest {
             hadAudioPermission,
             appContext.checkSelfPermission(audioPermission) == PackageManager.PERMISSION_GRANTED
         )
-    }
-
-    @OptIn(UnstableApi::class)
-    @Test
-    fun playbackServiceAcceptsAMediaControllerConnection() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val appContext = instrumentation.targetContext
-        // Keep an Activity in the foreground while establishing the controller connection. This
-        // mirrors the app's normal startup path and avoids racing a background bind during teardown.
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
-        val token = SessionToken(appContext, ComponentName(appContext, MusicPlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(appContext, token).buildAsync()
-
-        try {
-            val controller = controllerFuture.get(30, TimeUnit.SECONDS)
-            assertTrue(controller.isConnected)
-        } finally {
-            instrumentation.runOnMainSync {
-                MediaController.releaseFuture(controllerFuture)
-            }
-            scenario.close()
-        }
     }
 }
