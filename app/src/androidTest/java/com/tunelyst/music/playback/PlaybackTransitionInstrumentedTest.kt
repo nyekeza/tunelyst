@@ -74,7 +74,19 @@ class PlaybackTransitionInstrumentedTest {
                 activeController.prepare()
                 activeController.play()
             }
-            awaitCondition(instrumentation, "source track or its next queue item did not become available") {
+            awaitCondition(
+                instrumentation,
+                "source track or its next queue item did not become available",
+                diagnostics = {
+                    runOnMainSync(instrumentation) {
+                        "id=${activeController.currentMediaItem?.mediaId}, " +
+                            "isPlaying=${activeController.isPlaying}, " +
+                            "itemCount=${activeController.mediaItemCount}, " +
+                            "currentIndex=${activeController.currentMediaItemIndex}, " +
+                            "nextIndex=${activeController.nextMediaItemIndex}"
+                    }
+                }
+            ) {
                 runOnMainSync(instrumentation) {
                     activeController.currentMediaItem?.mediaId == "transition-source" &&
                         activeController.isPlaying &&
@@ -164,7 +176,8 @@ class PlaybackTransitionInstrumentedTest {
     private fun createWaveFile(directory: File, prefix: String, frequencyHz: Double): File {
         val file = File.createTempFile(prefix, ".wav", directory)
         val sampleRate = 44_100
-        val durationSeconds = 5
+        // Leave slow emulators enough time to expose the full queue before the source clip ends.
+        val durationSeconds = 30
         val sampleCount = sampleRate * durationSeconds
         val pcm = ByteBuffer.allocate(sampleCount * 2).order(ByteOrder.LITTLE_ENDIAN)
         repeat(sampleCount) { index ->
@@ -206,6 +219,7 @@ class PlaybackTransitionInstrumentedTest {
     private fun awaitCondition(
         instrumentation: android.app.Instrumentation,
         failureMessage: String,
+        diagnostics: (() -> String)? = null,
         condition: () -> Boolean
     ) {
         val deadline = SystemClock.elapsedRealtime() + 15_000L
@@ -213,7 +227,8 @@ class PlaybackTransitionInstrumentedTest {
             if (condition()) return
             SystemClock.sleep(40L)
         }
-        assertTrue(failureMessage, condition())
+        val details = diagnostics?.invoke()?.takeIf { it.isNotEmpty() }?.let { " ($it)" }.orEmpty()
+        assertTrue("$failureMessage$details", condition())
     }
 
     private fun <T> runOnMainSync(instrumentation: android.app.Instrumentation, block: () -> T): T {
