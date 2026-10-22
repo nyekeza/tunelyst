@@ -74,9 +74,13 @@ class PlaybackTransitionInstrumentedTest {
                 activeController.prepare()
                 activeController.play()
             }
-            awaitCondition(instrumentation, "source track did not start") {
-                currentMediaId(instrumentation, activeController) == "transition-source" &&
-                    isPlaying(instrumentation, activeController)
+            awaitCondition(instrumentation, "source track or its next queue item did not become available") {
+                runOnMainSync(instrumentation) {
+                    activeController.currentMediaItem?.mediaId == "transition-source" &&
+                        activeController.isPlaying &&
+                        activeController.mediaItemCount == 2 &&
+                        activeController.nextMediaItemIndex == 1
+                }
             }
 
             val nextRequest = runOnMainSync(instrumentation) {
