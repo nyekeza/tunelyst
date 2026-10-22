@@ -225,6 +225,7 @@ data class PlaybackUiState(
     val lastPlaybackError: String? = null
 )
 
+@OptIn(UnstableApi::class)
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = MusicRepository(application)
     private val store = LibraryStore(application)
