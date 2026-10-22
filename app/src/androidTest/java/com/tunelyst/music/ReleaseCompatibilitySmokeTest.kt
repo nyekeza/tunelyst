@@ -68,7 +68,11 @@ class ReleaseCompatibilitySmokeTest {
     @OptIn(UnstableApi::class)
     @Test
     fun playbackServiceAcceptsAMediaControllerConnection() {
-        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        // Keep an Activity in the foreground while establishing the controller connection. This
+        // mirrors the app's normal startup path and avoids racing a background bind during teardown.
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
         val token = SessionToken(appContext, ComponentName(appContext, MusicPlaybackService::class.java))
         val controllerFuture = MediaController.Builder(appContext, token).buildAsync()
 
@@ -76,9 +80,10 @@ class ReleaseCompatibilitySmokeTest {
             val controller = controllerFuture.get(30, TimeUnit.SECONDS)
             assertTrue(controller.isConnected)
         } finally {
-            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            instrumentation.runOnMainSync {
                 MediaController.releaseFuture(controllerFuture)
             }
+            scenario.close()
         }
     }
 }

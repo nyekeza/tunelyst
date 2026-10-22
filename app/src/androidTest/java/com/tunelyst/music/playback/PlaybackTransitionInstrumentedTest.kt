@@ -42,6 +42,10 @@ class PlaybackTransitionInstrumentedTest {
             createWaveFile(context.cacheDir, "transition-next", 329.63),
             createWaveFile(context.cacheDir, "transition-selected", 392.00)
         )
+        // Configure service-owned preferences before requesting the service; otherwise a fast
+        // emulator can create the service with the old settings before the test writes them.
+        settings.setCrossfadeSeconds(0)
+        settings.setManualSkipFadeSeconds(1)
         val controllerFuture = MediaController.Builder(
             context,
             androidx.media3.session.SessionToken(
@@ -52,8 +56,6 @@ class PlaybackTransitionInstrumentedTest {
         var controller: MediaController? = null
 
         try {
-            settings.setCrossfadeSeconds(0)
-            settings.setManualSkipFadeSeconds(1)
             val connectedController = controllerFuture.get(30, TimeUnit.SECONDS)
             controller = connectedController
             val activeController = connectedController
