@@ -12,11 +12,13 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.result.IntentSenderRequest
+import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
@@ -25,6 +27,8 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionResult
 import com.tunelyst.music.data.AppSettingsState
 import com.tunelyst.music.data.AppSettingsStore
 import com.tunelyst.music.data.AppThemeMode
@@ -57,6 +61,9 @@ import com.tunelyst.music.data.Song
 import com.tunelyst.music.data.TrackListeningStats
 import com.tunelyst.music.data.queueNextInsertionIndex
 import com.tunelyst.music.data.withOverride
+import com.tunelyst.music.playback.PendingPlaybackTransitionRequests
+import com.tunelyst.music.playback.PlaybackTransitionProtocol
+import com.tunelyst.music.playback.PlaybackTransitionRequest
 import com.tunelyst.music.playback.ReplayGainRuntimeCache
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -73,12 +80,10 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalDate
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.PI
+import java.util.concurrent.Executor
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
 
@@ -121,14 +126,6 @@ private data class ActiveListeningSession(
     var listenedMs: Long = 0L,
     var pendingPersistedMs: Long = 0L,
     var qualifiedPlayRecorded: Boolean = false
-)
-
-/** UI preview shown immediately during an outgoing manual-skip fade; cleared on player transition. */
-private data class PendingSkipPreview(
-    val sourceMediaId: String,
-    val targetMediaId: String,
-    val targetIndex: Int,
-    val generation: Long
 )
 
 private data class CachedCatalogRestore(
@@ -332,12 +329,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var genreEnrichmentJob: Job? = null
     private var homeRecommendationsJob: Job? = null
     private var homeRecommendationInputKey: HomeRecommendationInputKey? = null
-    private var manualSkipFadeJob: Job? = null
-    private var pendingSkipPreview: PendingSkipPreview? = null
     private var listeningSession: ActiveListeningSession? = null
     private var lastListeningSampleElapsedMs = 0L
-    private var manualSkipFadeGeneration = 0L
-    private var manualSkipFadeOriginalVolume = 1f
 
     init {
         // The playback service owns timer execution; this only restores the visible countdown.
@@ -809,7 +802,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun detachPlayer() {
-        cancelManualSkipFade(restoreVolume = true)
         player?.let { activePlayer ->
             sampleListeningSession(activePlayer, force = true)
             flushListeningProgress()
@@ -1383,10 +1375,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setManualSkipFadeSeconds(seconds: Int) {
         _audioSettings.value = audioSettingsStore.setManualSkipFadeSeconds(seconds)
-        if (seconds <= 0) {
-            cancelManualSkipFade(restoreVolume = true)
-            syncPlayback(player)
-        }
     }
 
     fun setThemeMode(mode: AppThemeMode) {
@@ -1839,6 +1827,43 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _playbackState.update { it.copy(promptForSmartShuffleOnCompletion = false) }
     }
 
+    private fun dispatchQueueTransition(
+        activePlayer: Player,
+        request: PlaybackTransitionRequest,
+        expectedGeneration: Long,
+        fallback: () -> Unit
+    ) {
+        val controller = activePlayer as? MediaController
+        if (controller == null) {
+            fallback()
+            return
+        }
+        val requestId = PendingPlaybackTransitionRequests.register(request)
+        val args = Bundle().apply {
+            putString(PlaybackTransitionProtocol.EXTRA_REQUEST_ID, requestId)
+        }
+        val future = runCatching {
+            controller.sendCustomCommand(PlaybackTransitionProtocol.transitionToQueueCommand, args)
+        }.getOrElse {
+            PendingPlaybackTransitionRequests.discard(requestId)
+            fallback()
+            return
+        }
+        future.addListener(
+            Runnable {
+                val accepted = runCatching { future.get().resultCode == SessionResult.RESULT_SUCCESS }
+                    .getOrDefault(false)
+                if (!accepted) {
+                    PendingPlaybackTransitionRequests.discard(requestId)
+                    Handler(Looper.getMainLooper()).post {
+                        if (player === activePlayer && playbackGeneration == expectedGeneration) fallback()
+                    }
+                }
+            },
+            Executor { command -> command.run() }
+        )
+    }
+
     fun playFrom(
         queue: List<Song>,
         index: Int,
@@ -1850,7 +1875,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         promptForSmartShuffleOnCompletion: Boolean = false
     ) {
         if (queue.isEmpty()) return
-        cancelManualSkipFade(restoreVolume = true)
         radioActive = radioSession && !smartShuffle
         playNextIndicatorIds.clear()
         queuedIndicatorIds.clear()
@@ -1884,16 +1908,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             playbackQueue.indexOfFirst { it.id == target.id }.takeIf { it >= 0 } ?: safeIndex
         val items = playbackQueue.map(::toMediaItem)
         player?.let { activePlayer ->
-            activePlayer.shuffleModeEnabled = false
-            // Repeat-one/all would prevent STATE_ENDED, so the Search/share auto-shuffle handoff
-            // could never run. These one-shot queues must finish before Smart Shuffle takes over.
-            if (autoShuffleOnCompletion || radioActive) activePlayer.repeatMode = Player.REPEAT_MODE_OFF
-            activePlayer.setMediaItems(items, playbackIndex, C.TIME_UNSET)
-            activePlayer.prepare()
-            activePlayer.play()
+            // Repeat-one/all would prevent the Search/share auto-shuffle handoff from reaching STATE_ENDED.
+            val requestedRepeatMode = if (autoShuffleOnCompletion || radioActive) {
+                Player.REPEAT_MODE_OFF
+            } else {
+                activePlayer.repeatMode
+            }
+            val request = PlaybackTransitionRequest(
+                mediaItems = items,
+                startIndex = playbackIndex,
+                startPositionMs = C.TIME_UNSET,
+                repeatMode = requestedRepeatMode,
+                shuffleModeEnabled = false,
+                playWhenReady = true
+            )
+            val expectedGeneration = playbackGeneration
+            dispatchQueueTransition(activePlayer, request, expectedGeneration) {
+                activePlayer.shuffleModeEnabled = false
+                activePlayer.repeatMode = requestedRepeatMode
+                activePlayer.setMediaItems(items, playbackIndex, C.TIME_UNSET)
+                activePlayer.prepare()
+                activePlayer.play()
+                syncPlayback(activePlayer)
+                persistPlaybackSession(activePlayer, force = true)
+            }
             recordPlayed(target.id, countPlay = false)
-            syncPlayback(activePlayer)
-            persistPlaybackSession(activePlayer, force = true)
         }
         scheduleEmbeddedReplayGainForCurrentQueue()
     }
@@ -1906,7 +1945,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
      * a freshly selected, diverse queue replaces only the items after it.
      */
     fun playSmartShuffle(songs: List<Song>) {
-        cancelManualSkipFade(restoreVolume = true)
         clearSmartShuffleCompletionPrompt()
         radioActive = false
         playNextIndicatorIds.clear()
@@ -2042,7 +2080,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun startRadioMix(seed: Song, stationSongs: List<Song>) = startRadioFromLocalSongs(seed, stationSongs)
 
     private fun startRadioFromLocalSongs(seed: Song, scopedSongs: List<Song>?) {
-        cancelManualSkipFade(restoreVolume = true)
         val librarySongs = _uiState.value.songs
         val stationPool = scopedSongs.orEmpty().distinctBy(Song::id)
         val localSongs = if (stationPool.size >= 2 && stationPool.any { it.id == seed.id }) stationPool else librarySongs
@@ -2093,7 +2130,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun replaceRadioQueueKeepingCurrent(activePlayer: Player, suggestions: List<Song>) {
         val currentIndex = activePlayer.currentMediaItemIndex
         if (currentIndex !in 0 until activePlayer.mediaItemCount) return
-        cancelManualSkipFade(restoreVolume = true)
         clearSmartShuffleCompletionPrompt()
         radioActive = true
         smartShuffleActive = false
@@ -2123,7 +2159,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Turn Radio off and discard its generated upcoming tracks, keeping explicit queued-next adds. */
     fun stopRadio() {
-        cancelManualSkipFade(restoreVolume = true)
         radioActive = false
         val activePlayer = player
         if (activePlayer == null) {
@@ -2488,7 +2523,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val activePlayer = player ?: return
-        cancelManualSkipFade(restoreVolume = true)
         if (activePlayer.isPlaying) {
             activePlayer.pause()
         } else {
@@ -2501,9 +2535,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun skipNext() {
         val activePlayer = player ?: return
         if (activePlayer.hasNextMediaItem()) {
-            performManualSkip(activePlayer, activePlayer.nextMediaItemIndex) { activePlayer.seekToNextMediaItem() }
-        } else {
-            cancelManualSkipFade(restoreVolume = true)
+            finishCurrentSessionAsSkip(activePlayer)
+            activePlayer.seekToNextMediaItem()
         }
         syncPlayback(activePlayer)
     }
@@ -2511,102 +2544,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun skipPrevious() {
         val activePlayer = player ?: return
         if (activePlayer.currentPosition > 3_000L) {
-            cancelManualSkipFade(restoreVolume = true)
             activePlayer.seekTo(0L)
         } else if (activePlayer.hasPreviousMediaItem()) {
-            performManualSkip(activePlayer, activePlayer.previousMediaItemIndex) { activePlayer.seekToPreviousMediaItem() }
+            finishCurrentSessionAsSkip(activePlayer)
+            activePlayer.seekToPreviousMediaItem()
         } else {
-            cancelManualSkipFade(restoreVolume = true)
             activePlayer.seekTo(0L)
         }
         syncPlayback(activePlayer)
     }
 
-    private fun performManualSkip(activePlayer: Player, targetIndex: Int, skip: () -> Unit) {
-        cancelManualSkipFade(restoreVolume = true)
-        val generation = manualSkipFadeGeneration
-        val sourceMediaId = activePlayer.currentMediaItem?.mediaId
-        val targetMediaId = targetIndex.takeIf { it in 0 until activePlayer.mediaItemCount }
-            ?.let(activePlayer::getMediaItemAt)
-            ?.mediaId
-        pendingSkipPreview = if (
-            sourceMediaId != null && targetMediaId != null && sourceMediaId != targetMediaId
-        ) {
-            PendingSkipPreview(sourceMediaId, targetMediaId, targetIndex, generation)
-        } else {
-            null
-        }
-
-        val settings = _audioSettings.value
-        val durationMs = settings.manualSkipFadeSeconds.coerceIn(0, 5) * 1_000L
-        val originalVolume = activePlayer.volume.coerceIn(0f, 1f)
-        if (durationMs <= 0L || !activePlayer.isPlaying || originalVolume < 0.98f) {
-            finishCurrentSessionAsSkip()
-            skip()
-            return
-        }
-
-        manualSkipFadeOriginalVolume = originalVolume
-        manualSkipFadeJob = viewModelScope.launch {
-            var transitioned = false
-            try {
-                val steps = (durationMs / 25L).toInt().coerceAtLeast(1)
-                val stepDelay = (durationMs / steps).coerceAtLeast(1L)
-                repeat(steps) { index ->
-                    if (generation != manualSkipFadeGeneration || player !== activePlayer) return@launch
-                    val progress = (index + 1).toFloat() / steps.toFloat()
-                    val gain = when (settings.crossfadeCurve) {
-                        com.tunelyst.music.data.CrossfadeCurve.EQUAL_POWER -> cos(progress * (PI.toFloat() / 2f)).coerceIn(0f, 1f)
-                        com.tunelyst.music.data.CrossfadeCurve.LINEAR -> 1f - progress
-                    }
-                    activePlayer.volume = originalVolume * gain
-                    delay(stepDelay)
-                }
-                if (generation != manualSkipFadeGeneration || player !== activePlayer) return@launch
-                val previousIndex = activePlayer.currentMediaItemIndex
-                val previousId = activePlayer.currentMediaItem?.mediaId
-                finishCurrentSessionAsSkip()
-                skip()
-                transitioned = withTimeoutOrNull(1_500L) {
-                    while (generation == manualSkipFadeGeneration && player === activePlayer &&
-                        activePlayer.currentMediaItemIndex == previousIndex && activePlayer.currentMediaItem?.mediaId == previousId
-                    ) delay(20L)
-                    activePlayer.currentMediaItemIndex != previousIndex || activePlayer.currentMediaItem?.mediaId != previousId
-                } ?: false
-                if (!transitioned && generation == manualSkipFadeGeneration && player === activePlayer) {
-                    activePlayer.volume = originalVolume
-                }
-            } finally {
-                if (generation == manualSkipFadeGeneration) {
-                    manualSkipFadeJob = null
-                    if (player === activePlayer) {
-                        if (!transitioned) activePlayer.volume = originalVolume
-                        if (pendingSkipPreview?.generation == generation) pendingSkipPreview = null
-                        syncPlayback(activePlayer)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun cancelManualSkipFade(restoreVolume: Boolean) {
-        val hadActiveFade = manualSkipFadeJob?.isActive == true
-        manualSkipFadeGeneration += 1L
-        manualSkipFadeJob?.cancel()
-        manualSkipFadeJob = null
-        pendingSkipPreview = null
-        if (restoreVolume && hadActiveFade) player?.volume = manualSkipFadeOriginalVolume
-    }
-
     fun seekTo(positionMs: Long) {
-        cancelManualSkipFade(restoreVolume = true)
         player?.seekTo(positionMs.coerceAtLeast(0L))
         syncPlayback(player)
     }
 
     fun toggleShuffle() {
         val activePlayer = player ?: return
-        cancelManualSkipFade(restoreVolume = true)
         clearSmartShuffleCompletionPrompt()
         if (smartShuffleActive || activePlayer.shuffleModeEnabled) {
             val currentIndex = activePlayer.currentMediaItemIndex
@@ -2756,7 +2710,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun syncPlayback(activePlayer: Player?) {
         if (activePlayer == null) {
-            pendingSkipPreview = null
             playNextIndicatorIds.clear()
             queuedIndicatorIds.clear()
             _playbackState.value = PlaybackUiState()
@@ -2765,27 +2718,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val songsById = cachedSongLookup.ifEmpty {
             (rawCatalogSongs + _uiState.value.songs + sharedSongs.values).associateBy(Song::id)
         }
-        val actualMediaItem = activePlayer.currentMediaItem
-        val actualMediaId = actualMediaItem?.mediaId
-        pendingSkipPreview?.let { preview ->
-            val targetStillQueued = preview.targetIndex in 0 until activePlayer.mediaItemCount &&
-                activePlayer.getMediaItemAt(preview.targetIndex).mediaId == preview.targetMediaId
-            if (actualMediaId != preview.sourceMediaId || !targetStillQueued) pendingSkipPreview = null
-        }
-        val preview = pendingSkipPreview
-        val effectiveCurrentIndex = preview?.targetIndex ?: activePlayer.currentMediaItemIndex
+        val currentIndex = activePlayer.currentMediaItemIndex
         val queue = (0 until activePlayer.mediaItemCount).map { index ->
             val item = activePlayer.getMediaItemAt(index)
             item.mediaId.toLongOrNull()?.let(songsById::get) ?: playbackPlaceholder(item, index)
         }
-        val currentSong = queue.getOrNull(effectiveCurrentIndex)
-        val upcomingSongIds = queue.drop((effectiveCurrentIndex + 1).coerceIn(0, queue.size)).map(Song::id).toSet()
+        val currentSong = queue.getOrNull(currentIndex)
+        val upcomingSongIds = queue.drop((currentIndex + 1).coerceIn(0, queue.size)).map(Song::id).toSet()
         playNextIndicatorIds.retainAll(upcomingSongIds)
         queuedIndicatorIds.retainAll(upcomingSongIds)
         val rawDuration = activePlayer.duration
-        val duration = if (preview == null && rawDuration > 0L && rawDuration != C.TIME_UNSET) rawDuration
+        val duration = if (rawDuration > 0L && rawDuration != C.TIME_UNSET) rawDuration
         else currentSong?.durationMs ?: 0L
-        val position = if (preview != null) 0L else activePlayer.currentPosition.coerceAtLeast(0L)
+        val position = activePlayer.currentPosition.coerceAtLeast(0L)
         _playbackState.value = PlaybackUiState(
             currentSong = currentSong,
             isPlaying = activePlayer.isPlaying,
@@ -2799,7 +2744,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             radioActive = radioActive,
             repeatMode = activePlayer.repeatMode,
             queue = queue,
-            currentIndex = effectiveCurrentIndex,
+            currentIndex = currentIndex,
             playNextSongIds = playNextIndicatorIds.toSet(),
             queuedSongIds = queuedIndicatorIds.toSet(),
             playbackSpeed = activePlayer.playbackParameters.speed,
@@ -2864,7 +2809,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         player?.let { sampleListeningSession(it, force = true) }
         finishListeningSession(completed = false, skipped = false)
-        cancelManualSkipFade(restoreVolume = true)
         // Do not cancel/clear the sleep timer here: the MediaSessionService continues playback
         // and owns its deadline/fade even after this Activity-scoped ViewModel is cleared.
         mediaStoreRefreshHandler.removeCallbacks(mediaStoreRefreshRunnable)

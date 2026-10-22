@@ -8,12 +8,15 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.audiofx.Equalizer
 import android.media.audiofx.LoudnessEnhancer
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
@@ -23,16 +26,18 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import com.tunelyst.music.MainActivity
 import com.tunelyst.music.data.AudioSettingsContract
 import com.tunelyst.music.data.AudioSettingsStore
 import com.tunelyst.music.data.CrossfadeCurve
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 /** Owns playback outside the Activity so music and media controls survive navigation/backgrounding. */
 @OptIn(UnstableApi::class)
@@ -61,25 +66,69 @@ class MusicPlaybackService : MediaSessionService() {
     private val equalizerSessionIds = mutableMapOf<ExoPlayer, Int>()
     private val loudnessEnhancers = mutableMapOf<ExoPlayer, LoudnessEnhancer>()
     private lateinit var audioSettings: SettingsSnapshot
+    private enum class CrossfadeKind { AUTOMATIC, MANUAL }
     private var crossfading = false
+    private var crossfadeKind: CrossfadeKind? = null
     private var preparedNextIndex = C.INDEX_UNSET
     private var targetMediaId: String? = null
     private var fadeSourceIndex = C.INDEX_UNSET
     private var fadeStartPositionMs = 0L
     private var fadeDurationMs = 0L
+    private var pendingManualTransition: PlaybackTransitionRequest? = null
+    private var activeManualTransition: PlaybackTransitionRequest? = null
+    private var pendingManualSourceMediaId: String? = null
+    private var manualFadeElapsedMs = 0L
+    private var manualFadeStartedAtElapsedMs = 0L
+    private var manualTransitionTimeout: Runnable? = null
     private var sleepTimerEndElapsedMs = 0L
     private var sleepTimerFadeOutMs = 0L
     private var sleepFadeWindowStartElapsedMs = 0L
     private var sleepFadeWindowEndElapsedMs = 0L
     private var sleepTimerFadeActive = false
     private var sleepTimerVolumeApplied = false
-    private var manualFadeInStartPositionMs = 0L
-    private var manualFadeInDurationMs = 0L
     private var crossfadeCancelRestoreStartVolume: Float? = null
     private var crossfadeCancelRestoreStartedAtMs = 0L
     private var transientRetryAttemptedMediaId: String? = null
     private var unexpectedPauseStartedAtElapsedMs = 0L
     private var lastUnexpectedPauseRecoveryAtElapsedMs = 0L
+
+    private val mediaSessionCallback = object : MediaSession.Callback {
+        override fun onConnectAsync(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): ListenableFuture<MediaSession.ConnectionResult> {
+            val defaults = if (controller.isTrusted) {
+                MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
+            } else {
+                MediaSession.ConnectionResult.DEFAULT_UNTRUSTED_SESSION_COMMANDS
+            }
+            val connection = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+            if (controller.packageName == packageName) {
+                connection.setAvailableSessionCommands(
+                    defaults.buildUpon().add(PlaybackTransitionProtocol.transitionToQueueCommand).build()
+                )
+            }
+            return Futures.immediateFuture(connection.build())
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle
+        ): ListenableFuture<SessionResult> {
+            if (controller.packageName != packageName ||
+                customCommand.customAction != PlaybackTransitionProtocol.ACTION_TRANSITION_TO_QUEUE
+            ) {
+                return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+            }
+            val requestId = args.getString(PlaybackTransitionProtocol.EXTRA_REQUEST_ID).orEmpty()
+            val request = PendingPlaybackTransitionRequests.take(requestId)
+            val accepted = request?.let { runCatching { transitionToQueue(it) }.getOrDefault(false) } == true
+            val resultCode = if (accepted) SessionResult.RESULT_SUCCESS else SessionError.ERROR_BAD_VALUE
+            return Futures.immediateFuture(SessionResult(resultCode))
+        }
+    }
 
     private val outputDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { refreshDeviceEqualizerProfile() }
@@ -94,9 +143,15 @@ class MusicPlaybackService : MediaSessionService() {
         applyEqualizerSettings()
         applyPlaybackParameters()
         applyLoudnessSettings()
-        if (audioSettings.crossfadeSeconds == 0 && previousCrossfade != 0) cancelCrossfade(restoreVolume = true)
+        if (audioSettings.crossfadeSeconds == 0 && previousCrossfade != 0 && crossfadeKind == CrossfadeKind.AUTOMATIC) {
+            cancelCrossfade(restoreVolume = true, smoothRestore = true)
+        }
         if (audioSettings.manualSkipFadeSeconds == 0 && previousManualFade != 0) {
-            cancelManualFadeIn(restoreVolume = true)
+            val manualRequest = pendingManualTransition ?: activeManualTransition
+            if (manualRequest != null) {
+                cancelCrossfade(restoreVolume = !sleepTimerFadeActive)
+                applyManualTransitionImmediately(manualRequest, restoreVolume = !sleepTimerFadeActive)
+            }
         }
     }
 
@@ -113,8 +168,9 @@ class MusicPlaybackService : MediaSessionService() {
             }
             val nextDelayMs = when {
                 crossfadeCancelRestoreStartVolume != null -> CROSSFADE_CANCEL_RESTORE_TICK_MS
-                crossfading || manualFadeInDurationMs > 0L -> TICK_INTERVAL_MS
-                sleepTimerEndElapsedMs > 0L || audioSettings.crossfadeSeconds > 0 -> ACTIVE_FEATURE_TICK_INTERVAL_MS
+                crossfading -> TICK_INTERVAL_MS
+                sleepTimerEndElapsedMs > 0L || audioSettings.crossfadeSeconds > 0 ||
+                    pendingManualTransition != null -> ACTIVE_FEATURE_TICK_INTERVAL_MS
                 else -> IDLE_TICK_INTERVAL_MS
             }
             mainHandler.postDelayed(this, nextDelayMs)
@@ -142,7 +198,8 @@ class MusicPlaybackService : MediaSessionService() {
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        mediaSession = MediaSession.Builder(this, foregroundPlayer)
+        mediaSession = MediaSession.Builder(this, createSessionPlayer(foregroundPlayer))
+            .setCallback(mediaSessionCallback)
             .setSessionActivity(sessionActivity)
             .build()
         runCatching { audioManager.registerAudioDeviceCallback(outputDeviceCallback, mainHandler) }
@@ -167,6 +224,10 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(crossfadeTicker)
+        manualTransitionTimeout?.let(mainHandler::removeCallbacks)
+        manualTransitionTimeout = null
+        pendingManualTransition = null
+        activeManualTransition = null
         pendingPlaybackErrorRecoveries.forEach { mainHandler.removeCallbacks(it) }
         pendingPlaybackErrorRecoveries.clear()
         if (::audioManager.isInitialized) runCatching { audioManager.unregisterAudioDeviceCallback(outputDeviceCallback) }
@@ -191,6 +252,79 @@ class MusicPlaybackService : MediaSessionService() {
         // Keep the CPU awake while local files are decoded and transitions are serviced in background.
         .setWakeMode(C.WAKE_MODE_LOCAL)
         .build()
+
+    /** Route controller track changes through the service so it can own both players' gain curves. */
+    private fun createSessionPlayer(target: ExoPlayer): Player = object : ForwardingPlayer(target) {
+        override fun seekToNextMediaItem() {
+            if (target !== foregroundPlayer) {
+                if (foregroundPlayer.hasNextMediaItem()) {
+                    requestManualTransitionToIndex(foregroundPlayer.nextMediaItemIndex)
+                }
+                return
+            }
+            if (advancePastCurrentManualTransition()) return
+            if (!target.hasNextMediaItem()) {
+                super.seekToNextMediaItem()
+                return
+            }
+            requestManualTransitionToIndex(target.nextMediaItemIndex)
+        }
+
+        override fun seekToNext() {
+            if (target !== foregroundPlayer) {
+                if (foregroundPlayer.hasNextMediaItem()) {
+                    requestManualTransitionToIndex(foregroundPlayer.nextMediaItemIndex)
+                }
+                return
+            }
+            if (advancePastCurrentManualTransition()) return
+            if (!target.hasNextMediaItem()) {
+                super.seekToNext()
+                return
+            }
+            requestManualTransitionToIndex(target.nextMediaItemIndex)
+        }
+
+        override fun seekToPreviousMediaItem() {
+            if (target !== foregroundPlayer || !target.hasPreviousMediaItem()) {
+                super.seekToPreviousMediaItem()
+                return
+            }
+            requestManualTransitionToIndex(target.previousMediaItemIndex)
+        }
+
+        override fun seekToPrevious() {
+            if (target !== foregroundPlayer) {
+                super.seekToPrevious()
+                return
+            }
+            if (target.currentPosition > target.maxSeekToPreviousPosition || !target.hasPreviousMediaItem()) {
+                target.seekTo(0L)
+            } else {
+                requestManualTransitionToIndex(target.previousMediaItemIndex)
+            }
+        }
+
+        override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
+            if (target !== foregroundPlayer || mediaItemIndex == target.currentMediaItemIndex ||
+                mediaItemIndex !in 0 until target.mediaItemCount
+            ) {
+                super.seekTo(mediaItemIndex, positionMs)
+                return
+            }
+            requestManualTransitionToIndex(mediaItemIndex, positionMs)
+        }
+
+        override fun seekToDefaultPosition(mediaItemIndex: Int) {
+            if (target !== foregroundPlayer || mediaItemIndex == target.currentMediaItemIndex ||
+                mediaItemIndex !in 0 until target.mediaItemCount
+            ) {
+                super.seekToDefaultPosition(mediaItemIndex)
+                return
+            }
+            requestManualTransitionToIndex(mediaItemIndex)
+        }
+    }
 
     /** Recover only a genuine stuck-ready state; never override a user/system pause or audio-focus suppression. */
     private fun recoverUnexpectedReadyPause() {
@@ -250,6 +384,10 @@ class MusicPlaybackService : MediaSessionService() {
                 if (playbackState == Player.STATE_READY && audioSettings.equalizerEnabled) {
                     ensureEqualizerAttached(target)
                 }
+                if (::standbyPlayer.isInitialized && target === standbyPlayer && playbackState == Player.STATE_READY) {
+                    if (pendingManualTransition != null) maybeBeginManualTransition()
+                    else if (!crossfading && preparedNextIndex != C.INDEX_UNSET) updateCrossfade()
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -258,14 +396,14 @@ class MusicPlaybackService : MediaSessionService() {
                 if (mediaItem?.mediaId != transientRetryAttemptedMediaId) transientRetryAttemptedMediaId = null
                 val expectedAutoTransition = reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
                     reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
-                if (crossfading && expectedAutoTransition && mediaItem?.mediaId == targetMediaId) {
-                    completeCrossfade()
-                } else if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK &&
-                    audioSettings.manualSkipFadeSeconds > 0 && !sleepTimerFadeActive) {
-                    cancelCrossfade(restoreVolume = false)
-                    beginManualFadeIn(audioSettings.manualSkipFadeSeconds)
-                } else if (crossfading || preparedNextIndex != C.INDEX_UNSET) {
+                val manualRequest = pendingManualTransition ?: activeManualTransition
+                if (manualRequest != null) {
                     cancelCrossfade(restoreVolume = !sleepTimerFadeActive)
+                    applyManualTransitionImmediately(manualRequest, restoreVolume = !sleepTimerFadeActive)
+                } else if (crossfading && expectedAutoTransition && mediaItem?.mediaId == targetMediaId) {
+                    completeCrossfade()
+                } else if (crossfading || preparedNextIndex != C.INDEX_UNSET) {
+                    cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
                 }
             }
 
@@ -278,7 +416,9 @@ class MusicPlaybackService : MediaSessionService() {
                 if (target === foregroundPlayer && reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
                     transientRetryAttemptedMediaId = null
                 }
-                if (target === foregroundPlayer && (crossfading || preparedNextIndex != C.INDEX_UNSET)) {
+                if (target === foregroundPlayer &&
+                    (crossfading || preparedNextIndex != C.INDEX_UNSET || pendingManualTransition != null)
+                ) {
                     cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
                 }
             }
@@ -288,8 +428,10 @@ class MusicPlaybackService : MediaSessionService() {
                 newPosition: Player.PositionInfo,
                 reason: Int
             ) {
-                if (target === foregroundPlayer && crossfading && reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
-                    cancelCrossfade(restoreVolume = true)
+                if (target === foregroundPlayer && reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION &&
+                    (crossfading || pendingManualTransition != null)
+                ) {
+                    cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
                 } else if (target === foregroundPlayer && !crossfading && reason != Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
                     clearPreparedPlayer()
                 }
@@ -298,19 +440,38 @@ class MusicPlaybackService : MediaSessionService() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying && audioSettings.equalizerEnabled) ensureEqualizerAttached(target)
                 if (target === foregroundPlayer && crossfading && ::standbyPlayer.isInitialized) {
-                    if (isPlaying) standbyPlayer.play() else standbyPlayer.pause()
+                    if (isPlaying) {
+                        standbyPlayer.play()
+                        resumeManualFadeClockIfPlaying()
+                    } else {
+                        pauseManualFadeClock()
+                        standbyPlayer.pause()
+                    }
+                } else if (::standbyPlayer.isInitialized && target === standbyPlayer &&
+                    crossfading && crossfadeKind == CrossfadeKind.MANUAL
+                ) {
+                    if (isPlaying) resumeManualFadeClockIfPlaying() else pauseManualFadeClock()
+                }
+                if (target === foregroundPlayer && !isPlaying && pendingManualTransition != null &&
+                    ::standbyPlayer.isInitialized && standbyPlayer.playbackState == Player.STATE_READY
+                ) {
+                    applyPendingManualTransitionImmediately()
                 }
             }
 
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                if (target === foregroundPlayer && (crossfading || preparedNextIndex != C.INDEX_UNSET)) {
-                    cancelCrossfade(restoreVolume = true, smoothRestore = true)
+                if (target === foregroundPlayer &&
+                    (crossfading || preparedNextIndex != C.INDEX_UNSET || pendingManualTransition != null)
+                ) {
+                    cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
                 }
             }
 
             override fun onRepeatModeChanged(repeatMode: Int) {
-                if (target === foregroundPlayer && (crossfading || preparedNextIndex != C.INDEX_UNSET)) {
-                    cancelCrossfade(restoreVolume = true, smoothRestore = true)
+                if (target === foregroundPlayer &&
+                    (crossfading || preparedNextIndex != C.INDEX_UNSET || pendingManualTransition != null)
+                ) {
+                    cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
                 }
             }
         }
@@ -328,13 +489,26 @@ class MusicPlaybackService : MediaSessionService() {
         if (target !== foregroundPlayer) {
             Log.w("TunelystPlayback", "Standby player failed for $failedItemId; preserving foreground playback", error)
             if (::standbyPlayer.isInitialized && target === standbyPlayer) {
-                if (crossfading) cancelCrossfade(restoreVolume = !sleepTimerFadeActive)
-                else if (preparedNextIndex != C.INDEX_UNSET) clearPreparedPlayer()
+                val manualRequest = pendingManualTransition ?: activeManualTransition
+                if (manualRequest != null) {
+                    cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
+                    applyManualTransitionImmediately(manualRequest, restoreVolume = false)
+                } else if (crossfading) {
+                    cancelCrossfade(restoreVolume = !sleepTimerFadeActive)
+                } else if (preparedNextIndex != C.INDEX_UNSET) {
+                    clearPreparedPlayer()
+                }
             }
             return
         }
 
         Log.e("TunelystPlayback", "Foreground playback failed for $failedItemId (code ${error.errorCode})", error)
+        val manualRequest = pendingManualTransition ?: activeManualTransition
+        if (manualRequest != null) {
+            cancelCrossfade(restoreVolume = !sleepTimerFadeActive)
+            applyManualTransitionImmediately(manualRequest, restoreVolume = !sleepTimerFadeActive)
+            return
+        }
         if (crossfading || preparedNextIndex != C.INDEX_UNSET) {
             cancelCrossfade(restoreVolume = !sleepTimerFadeActive)
         }
@@ -399,8 +573,16 @@ class MusicPlaybackService : MediaSessionService() {
         if (active == sleepTimerFadeActive) return
         val wasActive = sleepTimerFadeActive
         sleepTimerFadeActive = active
-        if (active && ::foregroundPlayer.isInitialized && (crossfading || preparedNextIndex != C.INDEX_UNSET)) {
-            cancelCrossfade(restoreVolume = true)
+        if (active && ::foregroundPlayer.isInitialized) {
+            val manualRequest = pendingManualTransition ?: activeManualTransition
+            if (manualRequest != null) {
+                cancelCrossfade(restoreVolume = false)
+                // Preserve the requested skip while leaving the sleep timer in control of volume.
+                applyManualTransitionImmediately(manualRequest, restoreVolume = false)
+            } else if (crossfading || preparedNextIndex != C.INDEX_UNSET || crossfadeCancelRestoreStartVolume != null) {
+                // Sleep-timer gain is the active owner of the foreground volume; never restore it to 1 here.
+                cancelCrossfade(restoreVolume = false)
+            }
         } else if (!active && wasActive && sleepTimerVolumeApplied && ::foregroundPlayer.isInitialized) {
             foregroundPlayer.volume = 1f
             sleepTimerVolumeApplied = false
@@ -417,7 +599,9 @@ class MusicPlaybackService : MediaSessionService() {
         }
         if (remainingMs > 0L) return
 
-        if (crossfading || preparedNextIndex != C.INDEX_UNSET) cancelCrossfade(restoreVolume = true)
+        if (crossfading || preparedNextIndex != C.INDEX_UNSET || pendingManualTransition != null) {
+            cancelCrossfade(restoreVolume = false)
+        }
         if (::standbyPlayer.isInitialized) {
             standbyPlayer.pause()
             standbyPlayer.volume = 1f
@@ -437,13 +621,22 @@ class MusicPlaybackService : MediaSessionService() {
         if (!::foregroundPlayer.isInitialized) return
         updateSleepTimerFadeState()
         if (sleepTimerFadeActive) {
+            if (pendingManualTransition != null) applyPendingManualTransitionImmediately()
             if (crossfading || preparedNextIndex != C.INDEX_UNSET || crossfadeCancelRestoreStartVolume != null) {
                 cancelCrossfade(restoreVolume = false)
             }
             return
         }
-        updateManualFadeIn()
         if (updateCrossfadeCancelVolumeRestore()) return
+        if (pendingManualTransition != null) {
+            maybeBeginManualTransition()
+            return
+        }
+        if (crossfading && crossfadeKind == CrossfadeKind.MANUAL) {
+            updateManualCrossfade()
+            return
+        }
+
         val player = foregroundPlayer
         if (!player.isPlaying || player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
             if (crossfading && !player.playWhenReady && ::standbyPlayer.isInitialized) standbyPlayer.pause()
@@ -473,25 +666,31 @@ class MusicPlaybackService : MediaSessionService() {
         ) {
             beginCrossfade(player.currentPosition, minOf(effectiveFadeMs, remainingMs), nextIndex)
         }
-        if (crossfading) {
+        if (crossfading && crossfadeKind == CrossfadeKind.AUTOMATIC) {
             if (player.currentMediaItemIndex != fadeSourceIndex || player.nextMediaItemIndex != preparedNextIndex) {
                 cancelCrossfade(restoreVolume = true, smoothRestore = true)
                 return
             }
             val elapsed = (player.currentPosition - fadeStartPositionMs).coerceAtLeast(0L)
             val progress = (elapsed.toFloat() / fadeDurationMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
-            when (audioSettings.crossfadeCurve) {
-                CrossfadeCurve.EQUAL_POWER -> {
-                    val angle = progress * (PI.toFloat() / 2f)
-                    player.volume = cos(angle).coerceIn(0f, 1f)
-                    standbyPlayer.volume = sin(angle).coerceIn(0f, 1f)
-                }
-                CrossfadeCurve.LINEAR -> {
-                    player.volume = 1f - progress
-                    standbyPlayer.volume = progress
-                }
-            }
+            applyCrossfadeGains(progress)
         }
+    }
+
+    private fun applyCrossfadeGains(progress: Float) {
+        if (!::standbyPlayer.isInitialized || !::foregroundPlayer.isInitialized) return
+        val gains = crossfadeGains(progress, audioSettings.crossfadeCurve)
+        foregroundPlayer.volume = gains.outgoing
+        standbyPlayer.volume = gains.incoming
+    }
+
+    private fun updateManualCrossfade() {
+        if (!::standbyPlayer.isInitialized || !foregroundPlayer.isPlaying || !standbyPlayer.isPlaying) return
+        val elapsedMs = manualFadeElapsedMs +
+            (SystemClock.elapsedRealtime() - manualFadeStartedAtElapsedMs).coerceAtLeast(0L)
+        val progress = (elapsedMs.toFloat() / fadeDurationMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
+        applyCrossfadeGains(progress)
+        if (progress >= 1f) completeCrossfade()
     }
 
     private fun sameAlbum(first: MediaItem?, second: MediaItem?): Boolean {
@@ -505,39 +704,224 @@ class MusicPlaybackService : MediaSessionService() {
         return firstArtist.isBlank() || secondArtist.isBlank() || firstArtist.equals(secondArtist, ignoreCase = true)
     }
 
+    private fun advancePastCurrentManualTransition(): Boolean {
+        if (pendingManualTransition == null &&
+            !(crossfading && crossfadeKind == CrossfadeKind.MANUAL)
+        ) return false
+
+        if (crossfading && crossfadeKind == CrossfadeKind.MANUAL) {
+            completeCrossfade()
+        } else {
+            applyPendingManualTransitionImmediately()
+        }
+        val active = foregroundPlayer
+        if (active.hasNextMediaItem()) requestManualTransitionToIndex(active.nextMediaItemIndex)
+        return true
+    }
+
+    private fun requestManualTransitionToIndex(index: Int, positionMs: Long = C.TIME_UNSET) {
+        val source = foregroundPlayer
+        if (index !in 0 until source.mediaItemCount) return
+        val currentQueue = (0 until source.mediaItemCount).map(source::getMediaItemAt)
+        transitionToQueue(
+            PlaybackTransitionRequest(
+                mediaItems = currentQueue,
+                startIndex = index,
+                startPositionMs = positionMs,
+                repeatMode = source.repeatMode,
+                shuffleModeEnabled = source.shuffleModeEnabled,
+                playWhenReady = source.playWhenReady,
+                keepCurrentQueue = true,
+                copyCurrentShuffleOrder = true
+            )
+        )
+    }
+
+    /** Starts a true two-player overlap when the manual fade setting is enabled. */
+    private fun transitionToQueue(request: PlaybackTransitionRequest): Boolean {
+        if (!::foregroundPlayer.isInitialized || request.mediaItems.isEmpty() ||
+            request.startIndex !in request.mediaItems.indices
+        ) return false
+        val source = foregroundPlayer
+        val targetMediaItem = request.mediaItems[request.startIndex]
+
+        val isEquivalentAutomaticTarget = crossfading && crossfadeKind == CrossfadeKind.AUTOMATIC &&
+            targetMediaItem.mediaId == targetMediaId && request.startIndex == preparedNextIndex &&
+            request.repeatMode == source.repeatMode && request.shuffleModeEnabled == source.shuffleModeEnabled &&
+            queuesHaveSameIds(request.mediaItems, source)
+        if (isEquivalentAutomaticTarget) {
+            completeCrossfade()
+            return true
+        }
+
+        if (crossfading || pendingManualTransition != null || preparedNextIndex != C.INDEX_UNSET ||
+            crossfadeCancelRestoreStartVolume != null
+        ) {
+            cancelCrossfade(
+                restoreVolume = !sleepTimerFadeActive,
+                smoothRestore = crossfading
+            )
+        }
+
+        val manualFadeMs = audioSettings.manualSkipFadeSeconds.coerceIn(
+            0,
+            AudioSettingsContract.MAX_MANUAL_SKIP_FADE_SECONDS
+        ) * 1_000L
+        val shouldOverlap = manualFadeMs > 0L && source.isPlaying && request.playWhenReady &&
+            !sleepTimerFadeActive && source.currentMediaItem?.mediaId != targetMediaItem.mediaId
+
+        if (!shouldOverlap) {
+            applyQueueToForeground(request, restoreVolume = !sleepTimerFadeActive)
+            return true
+        }
+
+        ensureStandbyPlayer()
+        pendingManualTransition = request
+        activeManualTransition = null
+        pendingManualSourceMediaId = source.currentMediaItem?.mediaId
+        preparedNextIndex = request.startIndex
+        targetMediaId = targetMediaItem.mediaId
+        fadeSourceIndex = source.currentMediaItemIndex
+        fadeStartPositionMs = 0L
+        val sourceDurationMs = source.duration
+        val sourceRemainingMs = if (sourceDurationMs > 0L && sourceDurationMs != C.TIME_UNSET) {
+            (sourceDurationMs - source.currentPosition).coerceAtLeast(1L)
+        } else {
+            manualFadeMs
+        }
+        fadeDurationMs = minOf(manualFadeMs, sourceRemainingMs).coerceAtLeast(1L)
+        manualFadeElapsedMs = 0L
+        manualFadeStartedAtElapsedMs = 0L
+
+        standbyPlayer.volume = 0f
+        standbyPlayer.repeatMode = request.repeatMode
+        standbyPlayer.setMediaItems(request.mediaItems, request.startIndex, request.startPositionMs)
+        if (request.copyCurrentShuffleOrder && source.shuffleModeEnabled) {
+            standbyPlayer.setShuffleOrder(source.shuffleOrder)
+        }
+        standbyPlayer.shuffleModeEnabled = request.shuffleModeEnabled
+        standbyPlayer.prepare()
+        scheduleManualTransitionTimeout()
+        maybeBeginManualTransition()
+        return true
+    }
+
+    private fun queuesHaveSameIds(items: List<MediaItem>, source: ExoPlayer): Boolean {
+        if (items.size != source.mediaItemCount) return false
+        return items.indices.all { index -> items[index].mediaId == source.getMediaItemAt(index).mediaId }
+    }
+
+    private fun maybeBeginManualTransition() {
+        val request = pendingManualTransition ?: return
+        if (sleepTimerFadeActive) {
+            applyPendingManualTransitionImmediately()
+            return
+        }
+        if (crossfadeCancelRestoreStartVolume != null) return
+        if (!::standbyPlayer.isInitialized || standbyPlayer.playbackState != Player.STATE_READY) return
+        if (foregroundPlayer.currentMediaItem?.mediaId != pendingManualSourceMediaId ||
+            !foregroundPlayer.isPlaying || !request.playWhenReady
+        ) {
+            applyPendingManualTransitionImmediately()
+            return
+        }
+        val target = request.mediaItems[request.startIndex]
+        if (target.mediaId != standbyPlayer.currentMediaItem?.mediaId) {
+            applyPendingManualTransitionImmediately()
+            return
+        }
+
+        clearManualTransitionTimeout()
+        pendingManualTransition = null
+        pendingManualSourceMediaId = null
+        activeManualTransition = request
+        crossfading = true
+        crossfadeKind = CrossfadeKind.MANUAL
+        fadeSourceIndex = foregroundPlayer.currentMediaItemIndex
+        fadeStartPositionMs = 0L
+        targetMediaId = target.mediaId
+        preparedNextIndex = request.startIndex
+        val incomingDurationMs = standbyPlayer.duration
+        if (incomingDurationMs > 0L && incomingDurationMs != C.TIME_UNSET) {
+            fadeDurationMs = minOf(fadeDurationMs, incomingDurationMs).coerceAtLeast(1L)
+        }
+        manualFadeElapsedMs = 0L
+        manualFadeStartedAtElapsedMs = 0L
+        standbyPlayer.volume = 0f
+        standbyPlayer.play()
+        resumeManualFadeClockIfPlaying()
+    }
+
+    private fun scheduleManualTransitionTimeout() {
+        clearManualTransitionTimeout()
+        val timeout = Runnable {
+            if (pendingManualTransition != null) applyPendingManualTransitionImmediately()
+        }
+        manualTransitionTimeout = timeout
+        mainHandler.postDelayed(timeout, MANUAL_PREPARE_TIMEOUT_MS)
+    }
+
+    private fun clearManualTransitionTimeout() {
+        manualTransitionTimeout?.let(mainHandler::removeCallbacks)
+        manualTransitionTimeout = null
+    }
+
+    private fun applyPendingManualTransitionImmediately() {
+        val request = pendingManualTransition ?: return
+        clearManualTransitionTimeout()
+        pendingManualTransition = null
+        pendingManualSourceMediaId = null
+        if (crossfading || preparedNextIndex != C.INDEX_UNSET || crossfadeCancelRestoreStartVolume != null) {
+            cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = crossfading)
+        }
+        applyManualTransitionImmediately(request, restoreVolume = !sleepTimerFadeActive)
+    }
+
+    private fun applyQueueToForeground(request: PlaybackTransitionRequest, restoreVolume: Boolean) {
+        if (!::foregroundPlayer.isInitialized) return
+        if (restoreVolume) {
+            foregroundPlayer.volume = 1f
+            clearCrossfadeCancelVolumeRestore()
+        }
+        if (request.keepCurrentQueue) {
+            foregroundPlayer.seekTo(request.startIndex, request.startPositionMs)
+            if (request.playWhenReady) foregroundPlayer.play() else foregroundPlayer.pause()
+            return
+        }
+        foregroundPlayer.repeatMode = request.repeatMode
+        foregroundPlayer.shuffleModeEnabled = request.shuffleModeEnabled
+        foregroundPlayer.setMediaItems(request.mediaItems, request.startIndex, request.startPositionMs)
+        foregroundPlayer.prepare()
+        if (request.playWhenReady) foregroundPlayer.play() else foregroundPlayer.pause()
+    }
+
+    /** Apply a fallback without reviving playback if the user paused while the incoming item loaded. */
+    private fun applyManualTransitionImmediately(request: PlaybackTransitionRequest, restoreVolume: Boolean) {
+        if (!::foregroundPlayer.isInitialized) return
+        applyQueueToForeground(
+            request.copy(playWhenReady = foregroundPlayer.playWhenReady),
+            restoreVolume = restoreVolume
+        )
+    }
+
+    private fun resumeManualFadeClockIfPlaying() {
+        if (crossfadeKind != CrossfadeKind.MANUAL || manualFadeStartedAtElapsedMs != 0L ||
+            !foregroundPlayer.isPlaying || !::standbyPlayer.isInitialized || !standbyPlayer.isPlaying
+        ) return
+        manualFadeStartedAtElapsedMs = SystemClock.elapsedRealtime()
+    }
+
+    private fun pauseManualFadeClock() {
+        val startedAt = manualFadeStartedAtElapsedMs
+        if (startedAt == 0L) return
+        manualFadeElapsedMs += (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+        manualFadeStartedAtElapsedMs = 0L
+    }
+
     private fun refreshDeviceEqualizerProfile() {
         if (!::audioSettingsStore.isInitialized || !::foregroundPlayer.isInitialized) return
         audioSettings = readAudioSettings()
         applyEqualizerSettings()
-    }
-
-    private fun beginManualFadeIn(seconds: Int) {
-        val durationMs = seconds.coerceIn(0, AudioSettingsContract.MAX_MANUAL_SKIP_FADE_SECONDS) * 1_000L
-        if (durationMs <= 0L) return
-        manualFadeInStartPositionMs = foregroundPlayer.currentPosition.coerceAtLeast(0L)
-        manualFadeInDurationMs = durationMs
-        foregroundPlayer.volume = 0f
-    }
-
-    private fun updateManualFadeIn() {
-        if (manualFadeInDurationMs <= 0L || !foregroundPlayer.isPlaying) return
-        val elapsedMs = (foregroundPlayer.currentPosition - manualFadeInStartPositionMs).coerceAtLeast(0L)
-        val progress = (elapsedMs.toFloat() / manualFadeInDurationMs.toFloat()).coerceIn(0f, 1f)
-        foregroundPlayer.volume = when (audioSettings.crossfadeCurve) {
-            CrossfadeCurve.EQUAL_POWER -> sin(progress * (PI.toFloat() / 2f)).coerceIn(0f, 1f)
-            CrossfadeCurve.LINEAR -> progress
-        }
-        if (progress >= 1f) {
-            foregroundPlayer.volume = 1f
-            manualFadeInStartPositionMs = 0L
-            manualFadeInDurationMs = 0L
-        }
-    }
-
-    private fun cancelManualFadeIn(restoreVolume: Boolean) {
-        manualFadeInStartPositionMs = 0L
-        manualFadeInDurationMs = 0L
-        if (restoreVolume && ::foregroundPlayer.isInitialized) foregroundPlayer.volume = 1f
     }
 
     @OptIn(UnstableApi::class)
@@ -562,13 +946,15 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun beginCrossfade(startPositionMs: Long, durationMs: Long, nextIndex: Int) {
         if (durationMs <= 0L || !::standbyPlayer.isInitialized || standbyPlayer.playbackState != Player.STATE_READY) return
-        cancelManualFadeIn(restoreVolume = true)
         crossfading = true
+        crossfadeKind = CrossfadeKind.AUTOMATIC
         fadeSourceIndex = foregroundPlayer.currentMediaItemIndex
         fadeStartPositionMs = startPositionMs
         fadeDurationMs = durationMs
         preparedNextIndex = nextIndex
         targetMediaId = foregroundPlayer.getMediaItemAt(nextIndex).mediaId
+        manualFadeElapsedMs = 0L
+        manualFadeStartedAtElapsedMs = 0L
         standbyPlayer.volume = 0f
         standbyPlayer.play()
     }
@@ -580,18 +966,23 @@ class MusicPlaybackService : MediaSessionService() {
         incoming.volume = 1f
         outgoing.volume = 0f
         incoming.setAudioAttributes(musicAudioAttributes, true)
-        mediaSession.setPlayer(incoming)
         foregroundPlayer = incoming
         standbyPlayer = outgoing
+        mediaSession.setPlayer(createSessionPlayer(foregroundPlayer))
         crossfading = false
+        crossfadeKind = null
+        activeManualTransition = null
+        pendingManualTransition = null
+        pendingManualSourceMediaId = null
+        clearManualTransitionTimeout()
+        manualFadeElapsedMs = 0L
+        manualFadeStartedAtElapsedMs = 0L
         clearCrossfadeCancelVolumeRestore()
         preparedNextIndex = C.INDEX_UNSET
         targetMediaId = null
         fadeSourceIndex = C.INDEX_UNSET
         fadeStartPositionMs = 0L
         fadeDurationMs = 0L
-        manualFadeInStartPositionMs = 0L
-        manualFadeInDurationMs = 0L
         standbyPlayer.volume = 1f
         standbyPlayer.pause()
         standbyPlayer.stop()
@@ -603,8 +994,13 @@ class MusicPlaybackService : MediaSessionService() {
         val wasCrossfading = crossfading
         val volumeBeforeCancel = if (::foregroundPlayer.isInitialized) foregroundPlayer.volume else 1f
         crossfading = false
-        manualFadeInStartPositionMs = 0L
-        manualFadeInDurationMs = 0L
+        crossfadeKind = null
+        pendingManualTransition = null
+        activeManualTransition = null
+        pendingManualSourceMediaId = null
+        clearManualTransitionTimeout()
+        manualFadeElapsedMs = 0L
+        manualFadeStartedAtElapsedMs = 0L
         if (restoreVolume && ::foregroundPlayer.isInitialized) {
             if (smoothRestore && wasCrossfading && volumeBeforeCancel < 0.999f) {
                 crossfadeCancelRestoreStartVolume = volumeBeforeCancel.coerceIn(0f, 1f)
@@ -822,11 +1218,12 @@ class MusicPlaybackService : MediaSessionService() {
 
     private companion object {
         const val SESSION_ACTIVITY_REQUEST_CODE = 47_001
-        const val TICK_INTERVAL_MS = 100L
+        const val TICK_INTERVAL_MS = 20L
         const val ACTIVE_FEATURE_TICK_INTERVAL_MS = 250L
         const val IDLE_TICK_INTERVAL_MS = 2_000L
         const val CROSSFADE_CANCEL_RESTORE_TICK_MS = 16L
         const val CROSSFADE_CANCEL_RESTORE_DURATION_MS = 200L
+        const val MANUAL_PREPARE_TIMEOUT_MS = 8_000L
         const val TRANSIENT_PLAYBACK_RETRY_DELAY_MS = 400L
         const val UNEXPECTED_PAUSE_RECOVERY_DELAY_MS = 4_000L
         const val UNEXPECTED_PAUSE_RECOVERY_COOLDOWN_MS = 15_000L
