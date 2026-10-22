@@ -131,10 +131,12 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import com.tunelyst.music.data.Song
 import com.tunelyst.music.data.formatTime
 import kotlin.math.roundToInt
 
+@OptIn(UnstableApi::class)
 @Composable
 fun FullPlayerDialog(
     song: Song,
