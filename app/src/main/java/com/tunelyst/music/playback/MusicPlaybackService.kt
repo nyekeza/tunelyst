@@ -686,6 +686,8 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun updateManualCrossfade() {
         if (!::standbyPlayer.isInitialized || !foregroundPlayer.isPlaying || !standbyPlayer.isPlaying) return
+        resumeManualFadeClockIfPlaying()
+        if (manualFadeStartedAtElapsedMs == 0L) return
         val elapsedMs = manualFadeElapsedMs +
             (SystemClock.elapsedRealtime() - manualFadeStartedAtElapsedMs).coerceAtLeast(0L)
         val progress = (elapsedMs.toFloat() / fadeDurationMs.coerceAtLeast(1L)).coerceIn(0f, 1f)
