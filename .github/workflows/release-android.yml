@@ -17,7 +17,7 @@ jobs:
     name: Build and publish release
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    environment: production
+    environment: Tunelyst
     permissions:
       contents: write
     steps:
@@ -93,7 +93,7 @@ jobs:
                 -z "${TUNELYST_RELEASE_STORE_PASSWORD:-}" || \
                 -z "${TUNELYST_RELEASE_KEY_ALIAS:-}" || \
                 -z "${TUNELYST_RELEASE_KEY_PASSWORD:-}" ]]; then
-            echo "::error::Add all four TUNELYST_RELEASE_* secrets in Settings > Environments > production."
+            echo "::error::Add all four TUNELYST_RELEASE_* secrets in Settings > Environments > Tunelyst."
             exit 1
           fi
 
