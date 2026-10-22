@@ -1,3 +1,5 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.tunelyst.music.ui
 
 import android.Manifest
@@ -24,7 +26,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
 import com.tunelyst.music.data.AppSettingsState
 import com.tunelyst.music.data.AppSettingsStore
 import com.tunelyst.music.data.AppThemeMode
@@ -225,7 +226,6 @@ data class PlaybackUiState(
     val lastPlaybackError: String? = null
 )
 
-@UnstableApi
 class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = MusicRepository(application)
     private val store = LibraryStore(application)
@@ -420,7 +420,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        @UnstableApi
         override fun onPositionDiscontinuity(
             oldPosition: Player.PositionInfo,
             newPosition: Player.PositionInfo,
