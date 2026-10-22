@@ -983,10 +983,10 @@ class MusicPlaybackService : MediaSessionService() {
         fadeSourceIndex = C.INDEX_UNSET
         fadeStartPositionMs = 0L
         fadeDurationMs = 0L
-        standbyPlayer.volume = 1f
         standbyPlayer.pause()
         standbyPlayer.stop()
         standbyPlayer.clearMediaItems()
+        standbyPlayer.volume = 1f
         standbyPlayer.setAudioAttributes(musicAudioAttributes, false)
     }
 
@@ -1013,10 +1013,10 @@ class MusicPlaybackService : MediaSessionService() {
             clearCrossfadeCancelVolumeRestore()
         }
         if (::standbyPlayer.isInitialized) {
-            standbyPlayer.volume = 1f
             standbyPlayer.pause()
             standbyPlayer.stop()
             standbyPlayer.clearMediaItems()
+            standbyPlayer.volume = 1f
         }
         preparedNextIndex = C.INDEX_UNSET
         targetMediaId = null
@@ -1046,10 +1046,10 @@ class MusicPlaybackService : MediaSessionService() {
     private fun clearPreparedPlayer() {
         if (crossfading) return
         if (::standbyPlayer.isInitialized) {
-            standbyPlayer.volume = 1f
             standbyPlayer.pause()
             standbyPlayer.stop()
             standbyPlayer.clearMediaItems()
+            standbyPlayer.volume = 1f
         }
         preparedNextIndex = C.INDEX_UNSET
         targetMediaId = null

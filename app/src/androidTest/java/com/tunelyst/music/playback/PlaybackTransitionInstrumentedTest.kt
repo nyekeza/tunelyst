@@ -85,7 +85,7 @@ class PlaybackTransitionInstrumentedTest {
             }
             assertTrue(
                 "incoming track position should show that it played during the crossfade",
-                currentPosition(instrumentation, activeController) >= 250L
+                currentPosition(instrumentation, activeController) >= 500L
             )
 
             val replacementItems = listOf(
@@ -121,7 +121,7 @@ class PlaybackTransitionInstrumentedTest {
             }
             assertTrue(
                 "replacement track position should show that it played during the crossfade",
-                currentPosition(instrumentation, activeController) >= 250L
+                currentPosition(instrumentation, activeController) >= 500L
             )
         } finally {
             controller?.let { activeController ->
