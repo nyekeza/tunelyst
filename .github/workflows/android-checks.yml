@@ -163,3 +163,31 @@ jobs:
           if not found_failure:
               print("All instrumentation test XML reports show zero failures.")
           PY
+
+      - name: Capture emulator diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "### Emulator diagnostics (API ${{ matrix.api-level }})"
+            echo
+            echo '```text'
+            echo '$ adb devices -l'
+            adb devices -l 2>&1
+            echo
+            echo '$ emulator -list-avds'
+            emulator -list-avds 2>&1
+            device_ids="$(adb devices 2>/dev/null | awk '$2 == "device" { print $1 }')"
+            for device in $device_ids; do
+              echo
+              echo "Device: $device"
+              echo '$ adb shell getprop sys.boot_completed'
+              timeout 15s adb -s "$device" shell getprop sys.boot_completed 2>&1
+              echo '$ adb shell getprop ro.build.version.sdk'
+              timeout 15s adb -s "$device" shell getprop ro.build.version.sdk 2>&1
+              echo 'Last 300 logcat lines:'
+              timeout 15s adb -s "$device" logcat -d -v threadtime -t 300 2>&1 | tail -n 300
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

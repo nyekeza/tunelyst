@@ -112,7 +112,7 @@ class PlaybackTransitionInstrumentedTest {
                 instrumentation,
                 "manual next did not finish",
                 diagnostics = {
-                    runOnMainSync(instrumentation) {
+                    val controllerState = runOnMainSync(instrumentation) {
                         "mediaId=${activeController.currentMediaItem?.mediaId}, " +
                             "playWhenReady=${activeController.playWhenReady}, " +
                             "isPlaying=${activeController.isPlaying}, " +
@@ -121,6 +121,7 @@ class PlaybackTransitionInstrumentedTest {
                             "currentIndex=${activeController.currentMediaItemIndex}, " +
                             "nextIndex=${activeController.nextMediaItemIndex}"
                     }
+                    "$controllerState, service=${transitionDebugState(instrumentation, activeController)}"
                 }
             ) {
                 currentMediaId(instrumentation, activeController) == "transition-next"
@@ -181,6 +182,24 @@ class PlaybackTransitionInstrumentedTest {
             PendingPlaybackTransitionRequests.discard(requestId)
             throw error
         }
+    }
+
+    private fun transitionDebugState(
+        instrumentation: android.app.Instrumentation,
+        controller: MediaController
+    ): String {
+        val future = AtomicReference<ListenableFuture<SessionResult>>()
+        runOnMainSync(instrumentation) {
+            future.set(
+                controller.sendCustomCommand(
+                    PlaybackTransitionProtocol.debugTransitionStateCommand,
+                    Bundle.EMPTY
+                )
+            )
+        }
+        return future.get().get(5, TimeUnit.SECONDS).extras
+            .getString(PlaybackTransitionProtocol.EXTRA_DEBUG_STATE)
+            .orEmpty()
     }
 
     private fun mediaItem(id: String, file: File): MediaItem = MediaItem.Builder()
