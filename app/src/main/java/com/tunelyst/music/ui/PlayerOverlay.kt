@@ -136,7 +136,7 @@ import com.tunelyst.music.data.Song
 import com.tunelyst.music.data.formatTime
 import kotlin.math.roundToInt
 
-@OptIn(UnstableApi::class)
+@UnstableApi
 @Composable
 fun FullPlayerDialog(
     song: Song,

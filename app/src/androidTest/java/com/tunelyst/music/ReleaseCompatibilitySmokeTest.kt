@@ -64,7 +64,7 @@ class ReleaseCompatibilitySmokeTest {
         )
     }
 
-    @OptIn(UnstableApi::class)
+    @UnstableApi
     @Test
     fun playbackServiceAcceptsAMediaControllerConnection() {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext

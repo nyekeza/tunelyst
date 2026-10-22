@@ -35,7 +35,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /** Owns playback outside the Activity so music and media controls survive navigation/backgrounding. */
-@OptIn(UnstableApi::class)
+@UnstableApi
 class MusicPlaybackService : MediaSessionService() {
     private lateinit var foregroundPlayer: ExoPlayer
     private lateinit var standbyPlayer: ExoPlayer

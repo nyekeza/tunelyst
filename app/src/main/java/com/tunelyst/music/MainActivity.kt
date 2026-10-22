@@ -22,7 +22,7 @@ import com.tunelyst.music.ui.TunelystMusicApp
 import com.tunelyst.music.ui.MusicViewModel
 import java.util.concurrent.Executor
 
-@OptIn(UnstableApi::class)
+@UnstableApi
 class MainActivity : ComponentActivity() {
     private val musicViewModel: MusicViewModel by viewModels {
         MusicViewModelFactory(application)
