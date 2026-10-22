@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d0e">
+  <meta name="description" content="Tunelyst is a private Android music player for songs saved on your phone.">
+  <title>Tunelyst — music that stays yours</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0b0d0e;
+      --surface: #141719;
+      --text: #f5f5f2;
+      --muted: #b9bfbe;
+      --accent: #f6d51d;
+      --line: #2c3233;
+      --max: 1120px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: inherit; }
+    .wrap { width: min(var(--max), calc(100% - 40px)); margin: 0 auto; }
+    header { border-bottom: 1px solid var(--line); }
+    .nav { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: inline-flex; align-items: center; gap: 12px; text-decoration: none; font-size: 1.12rem; font-weight: 700; }
+    .brand img { width: 42px; height: 42px; border-radius: 13px; }
+    .nav-links { display: flex; gap: 24px; align-items: center; color: var(--muted); font-size: .94rem; }
+    .nav-links a { text-decoration: none; }
+    .nav-links a:hover, footer a:hover { color: var(--accent); }
+    .hero { display: grid; grid-template-columns: 1.05fr .95fr; gap: 50px; align-items: center; padding: 74px 0 82px; }
+    .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .13em; font-weight: 700; font-size: .78rem; }
+    h1 { margin: 12px 0 16px; max-width: 630px; font-size: clamp(2.5rem, 6vw, 4.5rem); line-height: 1.03; letter-spacing: -.045em; }
+    .hero-copy { max-width: 590px; color: var(--muted); font-size: 1.13rem; }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 28px; }
+    .button { display: inline-flex; min-height: 48px; align-items: center; justify-content: center; padding: 0 22px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent); color: #171707; font-weight: 750; text-decoration: none; }
+    .button:hover { filter: brightness(1.06); }
+    .button.secondary { color: var(--text); background: transparent; border-color: #555d5d; }
+    .note { margin-top: 14px; color: #aab2b0; font-size: .9rem; }
+    .hero-image { display: flex; justify-content: center; }
+    .hero-image img { width: min(100%, 330px); max-height: 660px; object-fit: cover; object-position: top; border: 1px solid #414747; border-radius: 28px; box-shadow: 0 24px 70px #0008; }
+    section { padding: 64px 0; border-top: 1px solid var(--line); }
+    h2 { margin: 0 0 12px; font-size: clamp(1.7rem, 4vw, 2.35rem); line-height: 1.15; letter-spacing: -.025em; }
+    .intro { max-width: 680px; margin: 0 0 30px; color: var(--muted); }
+    .features { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .feature { padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
+    .feature h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    .feature p { margin: 0; color: var(--muted); font-size: .95rem; }
+    .screens { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; align-items: start; }
+    figure { margin: 0; }
+    figure img { display: block; width: 100%; max-width: 300px; margin: 0 auto; border: 1px solid var(--line); border-radius: 20px; }
+    figcaption { margin-top: 12px; color: var(--muted); text-align: center; }
+    .privacy { max-width: 800px; padding: 28px; border-left: 3px solid var(--accent); border-radius: 0 16px 16px 0; background: var(--surface); color: var(--muted); }
+    .privacy strong { color: var(--text); }
+    .download { display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 30px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface); }
+    .download p { margin: 7px 0 0; color: var(--muted); }
+    footer { padding: 30px 0 42px; border-top: 1px solid var(--line); color: var(--muted); font-size: .9rem; }
+    .footer-row { display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+    footer a { margin-left: 16px; text-decoration: none; }
+    @media (max-width: 780px) {
+      .hero { grid-template-columns: 1fr; gap: 34px; padding: 50px 0 60px; }
+      .hero-image img { width: min(78%, 300px); }
+      .features { grid-template-columns: repeat(2, 1fr); }
+      .screens { gap: 12px; }
+      .download { align-items: flex-start; flex-direction: column; }
+    }
+    @media (max-width: 520px) {
+      .wrap { width: min(var(--max), calc(100% - 28px)); }
+      .nav { min-height: 66px; }
+      .nav-links { gap: 13px; font-size: .85rem; }
+      .nav-links a:first-child { display: none; }
+      .features { grid-template-columns: 1fr; }
+      .screens { grid-template-columns: 1fr; gap: 28px; }
+      figure img { max-width: 280px; }
+      section { padding: 48px 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap nav">
+      <a class="brand" href="#top" aria-label="Tunelyst home">
+        <img src="assets/tunelyst-mark.jpg" alt="">
+        <span>Tunelyst</span>
+      </a>
+      <nav class="nav-links" aria-label="Main navigation">
+        <a href="#features">What it does</a>
+        <a href="#screenshots">Screenshots</a>
+        <a href="https://github.com/nyekeza/tunelyst">Source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <div class="wrap hero">
+      <div>
+        <div class="eyebrow">Music that stays yours</div>
+        <h1>Your music.<br>All in one place.</h1>
+        <p class="hero-copy">Tunelyst plays music saved on your Android phone, with personal mixes, thoughtful playback controls, and no account or streaming.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/nyekeza/tunelyst/releases/latest">Download Tunelyst</a>
+          <a class="button secondary" href="#screenshots">See the app</a>
+        </div>
+        <p class="note">For Android 8.0 and newer. On GitHub Releases, choose the app file to download.</p>
+      </div>
+      <div class="hero-image">
+        <img src="assets/home-mixes.jpg" alt="Tunelyst Home screen showing personal mixes and Best of artists">
+      </div>
+    </div>
+
+    <section id="features">
+      <div class="wrap">
+        <h2>Made for everyday listening</h2>
+        <p class="intro">A calm place for the songs already on your phone, with the tools you need close at hand.</p>
+        <div class="features">
+          <article class="feature">
+            <h3>Your library</h3>
+            <p>Browse songs, albums, artists, favorites, and playlists in one place.</p>
+          </article>
+          <article class="feature">
+            <h3>Personal mixes</h3>
+            <p>Find familiar favorites and new combinations shaped by your listening.</p>
+          </article>
+          <article class="feature">
+            <h3>Easy playback</h3>
+            <p>Manage what plays next, set a sleep timer, and keep listening in the background.</p>
+          </article>
+          <article class="feature">
+            <h3>Your choice</h3>
+            <p>Review library cleanup suggestions yourself. Nothing is deleted without your approval.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="screenshots">
+      <div class="wrap">
+        <h2>Take a look</h2>
+        <p class="intro">A simple, dark design that keeps your music in focus.</p>
+        <div class="screens">
+          <figure>
+            <img src="assets/now-playing.jpg" alt="Tunelyst player screen with album art and playback controls" loading="lazy">
+            <figcaption>Now Playing</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/home-mixes.jpg" alt="Tunelyst Home screen with listening picks and mixes" loading="lazy">
+            <figcaption>Home and mixes</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/drawer.jpg" alt="Tunelyst menu with Settings and Listening Stats" loading="lazy">
+            <figcaption>Settings and listening stats</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="privacy">
+      <div class="wrap">
+        <h2>Private by design</h2>
+        <p class="privacy"><strong>Your listening stays on your phone.</strong> Tunelyst doesn’t ask you to sign in, show ads, or connect to the internet. It doesn’t stream or upload your music. You decide if and when to export a backup.</p>
+      </div>
+    </section>
+
+    <section id="download">
+      <div class="wrap download">
+        <div>
+          <h2>Ready to listen?</h2>
+          <p>Download Tunelyst from the latest GitHub release and follow Android’s install prompt.</p>
+        </div>
+        <a class="button" href="https://github.com/nyekeza/tunelyst/releases/latest">Get the latest release</a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap footer-row">
+      <span>Tunelyst · Offline music for Android · MIT License</span>
+      <span>
+        <a href="https://github.com/nyekeza/tunelyst/releases/latest">Download</a>
+        <a href="https://github.com/nyekeza/tunelyst">GitHub</a>
+        <a href="https://github.com/nyekeza/tunelyst/issues">Help</a>
+      </span>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,36 @@
+name: Report a problem
+description: Tell us what went wrong.
+title: "[Problem] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please leave out private details, music files, backups, and passwords.
+  - type: input
+    id: app-version
+    attributes:
+      label: Tunelyst version
+      placeholder: For example, 1.1.55
+    validations:
+      required: true
+  - type: input
+    id: android-version
+    attributes:
+      label: Android version
+      placeholder: For example, Android 14
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: A short description is enough.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we see the problem?
+      description: List the steps, if you know them.
+    validations:
+      required: false

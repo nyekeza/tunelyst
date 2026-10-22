@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Download Tunelyst
+    url: https://github.com/nyekeza/tunelyst/releases/latest
+    about: Get the latest app and read its release notes.
