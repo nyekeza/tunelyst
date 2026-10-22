@@ -39,7 +39,9 @@ jobs:
         uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Run Android lint
-        run: bash ./gradlew --no-daemon lintDebug
+        run: |
+          set -o pipefail
+          bash ./gradlew --no-daemon lintDebug 2>&1 | tee "$RUNNER_TEMP/lint-debug.log"
 
       - name: Report Android lint errors
         if: failure()
@@ -85,7 +87,26 @@ jobs:
           PY
 
       - name: Run unit tests and build the debug app
-        run: bash ./gradlew --no-daemon testDebugUnitTest assembleDebug
+        run: |
+          set -o pipefail
+          bash ./gradlew --no-daemon testDebugUnitTest assembleDebug 2>&1 | tee "$RUNNER_TEMP/verify-build.log"
+
+      - name: Capture Gradle failure details
+        if: failure()
+        shell: bash
+        run: |
+          for log in "$RUNNER_TEMP/lint-debug.log" "$RUNNER_TEMP/verify-build.log"; do
+            if [[ -f "$log" ]]; then
+              {
+                echo "### $(basename "$log")"
+                echo
+                echo '```text'
+                tail -n 100 "$log"
+                echo '```'
+                echo
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
   instrumentation:
     name: Android ${{ matrix.api-level }} instrumentation
@@ -131,7 +152,9 @@ jobs:
           emulator-boot-timeout: 1200
           disable-animations: true
           emulator-options: '-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim'
-          script: bash ./gradlew --no-daemon connectedDebugAndroidTest
+          script: |
+            set -o pipefail
+            bash ./gradlew --no-daemon connectedDebugAndroidTest 2>&1 | tee "$RUNNER_TEMP/connectedDebugAndroidTest.log"
 
       - name: Report instrumented test failures
         if: always()
@@ -173,6 +196,11 @@ jobs:
             echo "### Emulator diagnostics (API ${{ matrix.api-level }})"
             echo
             echo '```text'
+            if [[ -f "$RUNNER_TEMP/connectedDebugAndroidTest.log" ]]; then
+              echo 'Gradle output (last 100 lines):'
+              tail -n 100 "$RUNNER_TEMP/connectedDebugAndroidTest.log"
+              echo
+            fi
             echo '$ adb devices -l'
             adb devices -l 2>&1
             echo

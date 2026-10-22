@@ -3,6 +3,7 @@ package com.tunelyst.music.playback
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -31,7 +32,6 @@ import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import com.tunelyst.music.BuildConfig
 import com.tunelyst.music.MainActivity
 import com.tunelyst.music.data.AudioSettingsContract
 import com.tunelyst.music.data.AudioSettingsStore
@@ -51,6 +51,8 @@ class MusicPlaybackService : MediaSessionService() {
     private lateinit var audioManager: AudioManager
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val isDebuggableBuild: Boolean
+        get() = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
     private val musicAudioAttributes by lazy {
         AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -110,7 +112,7 @@ class MusicPlaybackService : MediaSessionService() {
             val connection = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
             if (controller.packageName == packageName) {
                 val commands = defaults.buildUpon().add(PlaybackTransitionProtocol.transitionToQueueCommand)
-                if (BuildConfig.DEBUG) commands.add(PlaybackTransitionProtocol.debugTransitionStateCommand)
+                if (isDebuggableBuild) commands.add(PlaybackTransitionProtocol.debugTransitionStateCommand)
                 connection.setAvailableSessionCommands(commands.build())
             }
             return Futures.immediateFuture(connection.build())
@@ -125,7 +127,7 @@ class MusicPlaybackService : MediaSessionService() {
             if (controller.packageName != packageName) {
                 return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
             }
-            if (BuildConfig.DEBUG &&
+            if (isDebuggableBuild &&
                 customCommand.customAction == PlaybackTransitionProtocol.ACTION_GET_DEBUG_STATE
             ) {
                 val extras = Bundle().apply {
