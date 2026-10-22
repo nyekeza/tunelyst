@@ -79,7 +79,17 @@ class PlaybackTransitionInstrumentedTest {
                     isPlaying(instrumentation, activeController)
             }
 
-            runOnMainSync(instrumentation) { activeController.seekToNextMediaItem() }
+            val nextRequest = runOnMainSync(instrumentation) {
+                inQueueTransitionRequest(activeController, activeController.nextMediaItemIndex)
+            } ?: error("next transition request could not be created")
+            val nextCommandFuture = AtomicReference<ListenableFuture<SessionResult>>()
+            runOnMainSync(instrumentation) {
+                nextCommandFuture.set(sendTransitionRequest(activeController, nextRequest))
+            }
+            assertEquals(
+                SessionResult.RESULT_SUCCESS,
+                nextCommandFuture.get().get(15, TimeUnit.SECONDS).resultCode
+            )
             SystemClock.sleep(200L)
             assertEquals("transition-source", currentMediaId(instrumentation, activeController))
             awaitCondition(instrumentation, "manual next did not finish") {
@@ -94,27 +104,17 @@ class PlaybackTransitionInstrumentedTest {
                 mediaItem("transition-source", wavFiles[0]),
                 mediaItem("transition-selected", wavFiles[2])
             )
-            val requestId = PendingPlaybackTransitionRequests.register(
-                PlaybackTransitionRequest(
-                    mediaItems = replacementItems,
-                    startIndex = 1,
-                    startPositionMs = 0L,
-                    repeatMode = Player.REPEAT_MODE_OFF,
-                    shuffleModeEnabled = false,
-                    playWhenReady = true
-                )
+            val replacementRequest = PlaybackTransitionRequest(
+                mediaItems = replacementItems,
+                startIndex = 1,
+                startPositionMs = 0L,
+                repeatMode = Player.REPEAT_MODE_OFF,
+                shuffleModeEnabled = false,
+                playWhenReady = true
             )
-            val args = Bundle().apply {
-                putString(PlaybackTransitionProtocol.EXTRA_REQUEST_ID, requestId)
-            }
             val commandFuture = AtomicReference<ListenableFuture<SessionResult>>()
             runOnMainSync(instrumentation) {
-                commandFuture.set(
-                    activeController.sendCustomCommand(
-                        PlaybackTransitionProtocol.transitionToQueueCommand,
-                        args
-                    )
-                )
+                commandFuture.set(sendTransitionRequest(activeController, replacementRequest))
             }
             val commandResult = commandFuture.get().get(15, TimeUnit.SECONDS)
             assertEquals(SessionResult.RESULT_SUCCESS, commandResult.resultCode)
@@ -133,6 +133,22 @@ class PlaybackTransitionInstrumentedTest {
             settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds)
             settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds)
             wavFiles.forEach(File::delete)
+        }
+    }
+
+    private fun sendTransitionRequest(
+        controller: MediaController,
+        request: PlaybackTransitionRequest
+    ): ListenableFuture<SessionResult> {
+        val requestId = PendingPlaybackTransitionRequests.register(request)
+        val args = Bundle().apply {
+            putString(PlaybackTransitionProtocol.EXTRA_REQUEST_ID, requestId)
+        }
+        return try {
+            controller.sendCustomCommand(PlaybackTransitionProtocol.transitionToQueueCommand, args)
+        } catch (error: Throwable) {
+            PendingPlaybackTransitionRequests.discard(requestId)
+            throw error
         }
     }
 

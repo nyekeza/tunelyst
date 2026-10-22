@@ -6,6 +6,7 @@ import android.os.Looper
 import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.session.SessionCommand
 import com.tunelyst.music.data.CrossfadeCurve
 import java.util.UUID
@@ -27,6 +28,25 @@ internal data class PlaybackTransitionRequest(
     /** Preserve the active player's precomputed shuffle order for an in-queue transition. */
     val copyCurrentShuffleOrder: Boolean = false
 )
+
+/** Builds a service-owned transition request for a skip within the currently playing queue. */
+internal fun inQueueTransitionRequest(
+    player: Player,
+    startIndex: Int,
+    startPositionMs: Long = C.TIME_UNSET
+): PlaybackTransitionRequest? {
+    if (startIndex !in 0 until player.mediaItemCount) return null
+    return PlaybackTransitionRequest(
+        mediaItems = (0 until player.mediaItemCount).map(player::getMediaItemAt),
+        startIndex = startIndex,
+        startPositionMs = startPositionMs,
+        repeatMode = player.repeatMode,
+        shuffleModeEnabled = player.shuffleModeEnabled,
+        playWhenReady = player.playWhenReady,
+        keepCurrentQueue = true,
+        copyCurrentShuffleOrder = true
+    )
+}
 
 /**
  * The Activity and MediaSessionService run in the same app process. Keeping queue snapshots here

@@ -722,21 +722,8 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     private fun requestManualTransitionToIndex(index: Int, positionMs: Long = C.TIME_UNSET) {
-        val source = foregroundPlayer
-        if (index !in 0 until source.mediaItemCount) return
-        val currentQueue = (0 until source.mediaItemCount).map(source::getMediaItemAt)
-        transitionToQueue(
-            PlaybackTransitionRequest(
-                mediaItems = currentQueue,
-                startIndex = index,
-                startPositionMs = positionMs,
-                repeatMode = source.repeatMode,
-                shuffleModeEnabled = source.shuffleModeEnabled,
-                playWhenReady = source.playWhenReady,
-                keepCurrentQueue = true,
-                copyCurrentShuffleOrder = true
-            )
-        )
+        val request = inQueueTransitionRequest(foregroundPlayer, index, positionMs) ?: return
+        transitionToQueue(request)
     }
 
     /** Starts a true two-player overlap when the manual fade setting is enabled. */

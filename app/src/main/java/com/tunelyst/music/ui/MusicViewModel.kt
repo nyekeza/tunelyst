@@ -62,6 +62,7 @@ import com.tunelyst.music.data.TrackListeningStats
 import com.tunelyst.music.data.queueNextInsertionIndex
 import com.tunelyst.music.data.withOverride
 import com.tunelyst.music.playback.PendingPlaybackTransitionRequests
+import com.tunelyst.music.playback.inQueueTransitionRequest
 import com.tunelyst.music.playback.PlaybackTransitionProtocol
 import com.tunelyst.music.playback.PlaybackTransitionRequest
 import com.tunelyst.music.playback.ReplayGainRuntimeCache
@@ -1864,6 +1865,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun dispatchInQueueTransition(
+        activePlayer: Player,
+        targetIndex: Int,
+        fallback: () -> Unit
+    ) {
+        val request = inQueueTransitionRequest(activePlayer, targetIndex)
+        if (request == null) {
+            fallback()
+            return
+        }
+        dispatchQueueTransition(activePlayer, request, playbackGeneration, fallback)
+    }
+
     fun playFrom(
         queue: List<Song>,
         index: Int,
@@ -2536,7 +2550,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val activePlayer = player ?: return
         if (activePlayer.hasNextMediaItem()) {
             finishCurrentSessionAsSkip(activePlayer)
-            activePlayer.seekToNextMediaItem()
+            dispatchInQueueTransition(activePlayer, activePlayer.nextMediaItemIndex) {
+                activePlayer.seekToNextMediaItem()
+            }
         }
         syncPlayback(activePlayer)
     }
@@ -2547,7 +2563,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             activePlayer.seekTo(0L)
         } else if (activePlayer.hasPreviousMediaItem()) {
             finishCurrentSessionAsSkip(activePlayer)
-            activePlayer.seekToPreviousMediaItem()
+            dispatchInQueueTransition(activePlayer, activePlayer.previousMediaItemIndex) {
+                activePlayer.seekToPreviousMediaItem()
+            }
         } else {
             activePlayer.seekTo(0L)
         }
