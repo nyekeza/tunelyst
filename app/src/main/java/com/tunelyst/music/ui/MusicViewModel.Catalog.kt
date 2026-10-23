@@ -463,7 +463,7 @@ internal fun MusicViewModel.ensureGenreMetadataImpl(rawCatalogSongs: List<Song>?
             }
             withContext(Dispatchers.Main) {
                 if (catalogSavedAtMs != expectedSavedAtMs || catalogRevision != expectedRevision) return@withContext
-                this@MusicViewModel.rawCatalogSongs = enrichedCatalog
+                this@ensureGenreMetadataImpl.rawCatalogSongs = enrichedCatalog
                 catalogGenresLoaded = true
                 if (genresBySongId.isNotEmpty()) {
                     cachedSongLookup = (allEnrichedSongs + sharedSongs.values).associateBy(Song::id)
