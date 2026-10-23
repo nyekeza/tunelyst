@@ -108,6 +108,22 @@ jobs:
             fi
           done
 
+          python3 - "$RUNNER_TEMP/lint-debug.log" "$RUNNER_TEMP/verify-build.log" <<'PY'
+          import os
+          import sys
+
+          for path in sys.argv[1:]:
+              if not os.path.isfile(path):
+                  continue
+              with open(path, encoding="utf-8", errors="replace") as log:
+                  excerpt = "".join(log.readlines()[-60:]).strip()
+              if not excerpt:
+                  continue
+              excerpt = excerpt[-12000:]
+              escaped = excerpt.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Gradle failure log::{os.path.basename(path)}%0A{escaped}")
+          PY
+
   instrumentation:
     name: Android ${{ matrix.api-level }} instrumentation
     runs-on: ubuntu-latest
@@ -219,3 +235,18 @@ jobs:
             done
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -f "$RUNNER_TEMP/connectedDebugAndroidTest.log" ]]; then
+            python3 - "$RUNNER_TEMP/connectedDebugAndroidTest.log" <<'PY'
+          import os
+          import sys
+
+          path = sys.argv[1]
+          with open(path, encoding="utf-8", errors="replace") as log:
+              excerpt = "".join(log.readlines()[-60:]).strip()
+          if excerpt:
+              excerpt = excerpt[-12000:]
+              escaped = excerpt.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Instrumentation failure log::{os.path.basename(path)}%0A{escaped}")
+          PY
+          fi
