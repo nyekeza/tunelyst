@@ -1,4 +1,4 @@
-package com.tunelyst.music.data
+package com.tunelyst.music.core.logic
 
 /**
  * Returns the insertion point after the current song and any already queued-next tracks.

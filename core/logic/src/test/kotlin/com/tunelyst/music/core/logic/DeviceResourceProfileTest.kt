@@ -1,4 +1,4 @@
-package com.tunelyst.music.ui
+package com.tunelyst.music.core.logic
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

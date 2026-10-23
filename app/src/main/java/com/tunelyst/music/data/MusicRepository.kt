@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import com.tunelyst.music.core.logic.cleanTrackDisplayName
 
 /** Reads the indexed library and resolves audio explicitly shared through Android providers. */
 class MusicRepository(context: Context) {

@@ -1,4 +1,4 @@
-package com.tunelyst.music.data
+package com.tunelyst.music.core.logic
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

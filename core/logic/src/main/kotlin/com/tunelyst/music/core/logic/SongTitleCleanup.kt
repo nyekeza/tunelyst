@@ -1,4 +1,4 @@
-package com.tunelyst.music.data
+package com.tunelyst.music.core.logic
 
 import java.util.Locale
 

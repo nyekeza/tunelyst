@@ -2,13 +2,13 @@ package com.tunelyst.music.ui
 
 import android.Manifest
 import android.app.Activity
-import android.content.Context
 import android.content.ClipData
 import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,138 +16,62 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.only
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.sp
+
 import com.tunelyst.music.data.Song
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.layout.padding
-import androidx.compose.ui.unit.dp
+
 import kotlinx.coroutines.launch
 
-private enum class AppTab { HOME, SEARCH, LIBRARY, LIKED, LISTENING_STATS, SETTINGS }
-
-private data class PendingDeviceAudioDeletion(
-    val description: String,
-    val uriStrings: List<String>,
-    val skippedCount: Int
-)
-
-private val pendingDeviceDeletionSaver = Saver<PendingDeviceAudioDeletion?, String>(
-    save = { request ->
-        request?.let {
-            org.json.JSONObject()
-                .put("description", it.description)
-                .put("uris", org.json.JSONArray(it.uriStrings))
-                .put("skipped", it.skippedCount)
-                .toString()
-        } ?: ""
-    },
-    restore = { encoded ->
-        if (encoded.isBlank()) null else runCatching {
-            val json = org.json.JSONObject(encoded)
-            val uriArray = json.optJSONArray("uris") ?: org.json.JSONArray()
-            PendingDeviceAudioDeletion(
-                description = json.optString("description"),
-                uriStrings = List(uriArray.length()) { index -> uriArray.optString(index) }.filter(String::isNotBlank),
-                skippedCount = json.optInt("skipped").coerceAtLeast(0)
-            )
-        }.getOrNull()
-    }
-)
-
-private val titleFixRequestsSaver = Saver<List<TitleFixRequest>, String>(
-    save = { requests ->
-        org.json.JSONArray().apply {
-            requests.forEach { request ->
-                put(
-                    org.json.JSONObject()
-                        .put("songId", request.songId)
-                        .put("title", request.suggestedTitle)
-                        .put("uri", request.mediaUriString.orEmpty())
-                        .put("currentName", request.currentFileName)
-                        .put("newName", request.newFileName)
-                        .put("folderPath", request.folderPath)
-                        .put("currentTitle", request.currentTitle)
-                        .put("currentArtist", request.currentArtist)
-                        .put("suggestedArtist", request.suggestedArtist.orEmpty())
-                )
-            }
-        }.toString()
-    },
-    restore = { encoded ->
-        runCatching {
-            val json = org.json.JSONArray(encoded)
-            List(json.length()) { index ->
-                val item = json.getJSONObject(index)
-                TitleFixRequest(
-                    songId = item.optLong("songId"),
-                    suggestedTitle = item.optString("title"),
-                    mediaUriString = item.optString("uri").takeIf(String::isNotBlank),
-                    currentFileName = item.optString("currentName"),
-                    newFileName = item.optString("newName"),
-                    folderPath = item.optString("folderPath"),
-                    currentTitle = item.optString("currentTitle"),
-                    currentArtist = item.optString("currentArtist"),
-                    suggestedArtist = item.optString("suggestedArtist").takeIf(String::isNotBlank)
-                )
-            }
-        }.getOrDefault(emptyList())
-    }
-)
 
 @Composable
 fun TunelystMusicApp(viewModel: MusicViewModel) {
@@ -184,38 +108,15 @@ fun TunelystMusicApp(viewModel: MusicViewModel) {
         val titleFixMessage by viewModel.titleFixMessage.collectAsStateWithLifecycle()
         val embeddedTagWriteMessage by viewModel.embeddedTagWriteMessage.collectAsStateWithLifecycle()
         val appSnackbarHostState = remember { SnackbarHostState() }
-        LaunchedEffect(embeddedTagWriteMessage) {
-            val message = embeddedTagWriteMessage ?: return@LaunchedEffect
-            appSnackbarHostState.showSnackbar(message)
-            viewModel.clearEmbeddedTagWriteMessage(message)
-        }
-        LaunchedEffect(playerConnectionError) {
-            val message = playerConnectionError ?: return@LaunchedEffect
-            val result = appSnackbarHostState.showSnackbar(
-                message = message,
-                actionLabel = "Retry",
-                withDismissAction = true,
-                duration = androidx.compose.material3.SnackbarDuration.Long
-            )
-            viewModel.clearPlayerConnectionError()
-            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) {
-                viewModel.retryPlayerConnection()
-            }
-        }
         val shouldPromptForSmartShuffle = playback.isEnded && playback.promptForSmartShuffleOnCompletion
-        LaunchedEffect(shouldPromptForSmartShuffle) {
-            if (!shouldPromptForSmartShuffle) return@LaunchedEffect
-            val result = appSnackbarHostState.showSnackbar(
-                message = "Mix finished · continue with Smart Shuffle?",
-                actionLabel = "Continue",
-                withDismissAction = true,
-                duration = androidx.compose.material3.SnackbarDuration.Long
-            )
-            viewModel.clearSmartShuffleCompletionPrompt()
-            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) {
-                viewModel.playSmartShuffle(currentLibrarySongs)
-            }
-        }
+        AppSnackbarEffects(
+            viewModel = viewModel,
+            embeddedTagWriteMessage = embeddedTagWriteMessage,
+            playerConnectionError = playerConnectionError,
+            shouldPromptForSmartShuffle = shouldPromptForSmartShuffle,
+            currentLibrarySongs = currentLibrarySongs,
+            snackbarHostState = appSnackbarHostState
+        )
 
         var hasAudioPermission by remember { mutableStateOf(hasAudioPermission(context)) }
         var hasAskedAudioPermission by rememberSaveable { mutableStateOf(false) }
@@ -402,7 +303,7 @@ fun TunelystMusicApp(viewModel: MusicViewModel) {
             }
 
             val selectedPlaylist = library.playlists.firstOrNull { it.id == selectedPlaylistId }
-            val currentSong = playback.currentSong
+            val currentSong = playback.displaySong
             val playerArtworkPalette = rememberArtworkPalette(
                 currentSong?.artworkUri,
                 currentSong?.title ?: "home"
@@ -530,7 +431,7 @@ fun TunelystMusicApp(viewModel: MusicViewModel) {
                 lessLikeGenreNames = library.lessLikeGenreNames,
                 playNextSongIds = playback.playNextSongIds,
                 queuedSongIds = playback.queuedSongIds,
-                currentlyPlayingSongId = playback.currentSong?.id,
+                currentlyPlayingSongId = playback.displaySong?.id,
                 isPlaying = playback.isPlaying,
                 onToggleLessLikeArtist = viewModel::toggleLessLikeArtist,
                 onToggleLessLikeGenres = viewModel::toggleLessLikeGenres,
@@ -1066,132 +967,28 @@ fun TunelystMusicApp(viewModel: MusicViewModel) {
                 )
             }
 
-            pendingBackupImportUri?.let { uri ->
-                AlertDialog(
-                    onDismissRequest = { pendingBackupImportUri = null },
-                    title = { Text("Restore personal data?", fontWeight = FontWeight.Bold) },
-                    text = {
-                        Text(
-                            "This replaces Tunelyst's personal library data and settings. Audio files are not copied or changed; device-specific folder exclusions and picked artwork are not restored. Track links are matched to this device's library where possible.",
-                            color = TunelystColors.Muted
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            pendingBackupImportUri = null
-                            viewModel.importBackup(uri)
-                        }) { Text("Restore", color = TunelystColors.Rose) }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { pendingBackupImportUri = null }) { Text("Cancel", color = TunelystColors.Muted) }
-                    },
-                    containerColor = TunelystColors.Surface
-                )
-            }
-
-            titleFixMessage?.let { message ->
-                AlertDialog(
-                    onDismissRequest = viewModel::clearTitleFixMessage,
-                    title = { Text("Title fixes", fontWeight = FontWeight.Bold) },
-                    text = { Text(message, color = TunelystColors.Muted) },
-                    confirmButton = { TextButton(onClick = viewModel::clearTitleFixMessage) { Text("OK", color = TunelystColors.Primary) } },
-                    containerColor = TunelystColors.Surface
-                )
-            }
-
-            deviceDeleteConfirmation?.let { request ->
-                val fileCount = request.uriStrings.size
-                AlertDialog(
-                    onDismissRequest = { deviceDeleteConfirmation = null },
-                    title = { Text("Permanently delete audio?", fontWeight = FontWeight.Bold) },
-                    text = {
-                        Text(
-                            "This will permanently delete $fileCount ${if (fileCount == 1) "audio file" else "audio files"} from your device (${request.description}). This cannot be undone. Continue to the required Android approval or storage-permission step. Empty folders may remain if they contain other files." +
-                                if (request.skippedCount > 0) " ${request.skippedCount} shared or unsupported ${if (request.skippedCount == 1) "track is" else "tracks are"} not included." else "",
-                            color = TunelystColors.Muted
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { confirmDeviceDeletion(request) }) { Text("Continue", color = TunelystColors.Rose) }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { deviceDeleteConfirmation = null }) { Text("Cancel", color = TunelystColors.Muted) }
-                    },
-                    containerColor = TunelystColors.Surface
-                )
-            }
-
-            deviceDeleteFeedback?.let { message ->
-                AlertDialog(
-                    onDismissRequest = { deviceDeleteFeedback = null },
-                    title = { Text("Device audio", fontWeight = FontWeight.Bold) },
-                    text = { Text(message, color = TunelystColors.Muted) },
-                    confirmButton = { TextButton(onClick = { deviceDeleteFeedback = null }) { Text("OK", color = TunelystColors.Primary) } },
-                    containerColor = TunelystColors.Surface
-                )
-            }
-
-            deviceDeleteMessage?.let { message ->
-                AlertDialog(
-                    onDismissRequest = viewModel::clearDeviceDeleteMessage,
-                    title = { Text("Device audio", fontWeight = FontWeight.Bold) },
-                    text = { Text(message, color = TunelystColors.Muted) },
-                    confirmButton = { TextButton(onClick = viewModel::clearDeviceDeleteMessage) { Text("OK", color = TunelystColors.Primary) } },
-                    containerColor = TunelystColors.Surface
-                )
-            }
-
-            playback.lastPlaybackError?.let { message ->
-                AlertDialog(
-                    onDismissRequest = viewModel::clearPlaybackError,
-                    title = { Text("Playback issue", fontWeight = FontWeight.Bold) },
-                    text = { Text(message, color = TunelystColors.Muted) },
-                    confirmButton = { TextButton(onClick = viewModel::clearPlaybackError) { Text("OK", color = TunelystColors.Primary) } },
-                    containerColor = TunelystColors.Surface
-                )
-            }
-
-            playlistToDeleteId?.let { playlistId ->
-                val playlistName = library.playlists.firstOrNull { it.id == playlistId }?.name ?: "this playlist"
-                AlertDialog(
-                    onDismissRequest = { playlistToDeleteId = null },
-                    title = { Text("Delete playlist?", fontWeight = FontWeight.Bold) },
-                    text = { Text("\"$playlistName\" will be removed from this device. Your audio files will not be deleted.", color = TunelystColors.Muted) },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            viewModel.deletePlaylist(playlistId)
-                            playlistToDeleteId = null
-                            selectedPlaylistId = null
-                        }) { Text("Delete", color = TunelystColors.Rose) }
-                    },
-                    dismissButton = { TextButton(onClick = { playlistToDeleteId = null }) { Text("Cancel") } },
-                    containerColor = TunelystColors.Surface
-                )
-            }
+            AppFeedbackDialogs(
+                viewModel = viewModel,
+                backupImportUri = pendingBackupImportUri,
+                onDismissBackupImport = { pendingBackupImportUri = null },
+                titleFixMessage = titleFixMessage,
+                deviceDeleteConfirmation = deviceDeleteConfirmation,
+                onDismissDeviceDeleteConfirmation = { deviceDeleteConfirmation = null },
+                onConfirmDeviceDeletion = ::confirmDeviceDeletion,
+                deviceDeleteFeedback = deviceDeleteFeedback,
+                onDismissDeviceDeleteFeedback = { deviceDeleteFeedback = null },
+                deviceDeleteMessage = deviceDeleteMessage,
+                lastPlaybackError = playback.lastPlaybackError,
+                playlistToDeleteId = playlistToDeleteId,
+                playlists = library.playlists,
+                onDismissPlaylistDelete = { playlistToDeleteId = null },
+                onDeletePlaylist = { playlistId ->
+                    viewModel.deletePlaylist(playlistId)
+                    playlistToDeleteId = null
+                    selectedPlaylistId = null
+                }
+            )
             }
         }
     }
-}
-
-@Composable
-private fun navItemColors() = NavigationBarItemDefaults.colors(
-    selectedIconColor = TunelystColors.Primary,
-    selectedTextColor = TunelystColors.Primary,
-    indicatorColor = TunelystColors.Primary.copy(alpha = 0.13f),
-    unselectedIconColor = TunelystColors.Subtle,
-    unselectedTextColor = TunelystColors.Subtle
-)
-
-@Composable
-private fun MusicLibraryGlyph(selected: Boolean = false) {
-    LibraryTabIcon(selected = selected)
-}
-
-private fun hasAudioPermission(context: Context): Boolean =
-    ContextCompat.checkSelfPermission(context, audioPermissionForDevice()) == PackageManager.PERMISSION_GRANTED
-
-private fun audioPermissionForDevice(): String = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-    Manifest.permission.READ_MEDIA_AUDIO
-} else {
-    Manifest.permission.READ_EXTERNAL_STORAGE
 }

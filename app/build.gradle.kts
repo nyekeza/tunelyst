@@ -38,8 +38,8 @@ android {
         applicationId = "com.tunelyst.music"
         minSdk = 26
         targetSdk = 36
-        versionCode = 68
-        versionName = "1.1.56"
+        versionCode = 69
+        versionName = "1.1.57"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -124,6 +124,7 @@ gradle.taskGraph.whenReady(
 )
 
 dependencies {
+    implementation(project(":core:logic"))
     implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")

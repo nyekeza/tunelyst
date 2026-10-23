@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Tunelyst"
-include(":app")
+include(":app", ":core:logic")

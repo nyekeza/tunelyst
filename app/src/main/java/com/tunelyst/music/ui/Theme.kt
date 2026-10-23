@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.isSystemInDarkTheme
 import com.tunelyst.music.data.AppThemeMode
+import com.tunelyst.music.core.logic.isTunelystLowMemoryDevice
 
 internal data class TunelystPalette(
     val background: Color,

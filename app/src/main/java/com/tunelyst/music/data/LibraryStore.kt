@@ -1,38 +1,18 @@
 package com.tunelyst.music.data
 
 import android.content.Context
+
+import com.tunelyst.music.core.logic.normalizeTasteKey
+
 import org.json.JSONArray
 import org.json.JSONObject
+
 import java.util.UUID
-
-internal fun boundedUniqueIds(
-    values: List<Long>,
-    limit: Int,
-    validIds: Set<Long>? = null
-): List<Long> {
-    if (limit <= 0) return emptyList()
-    return values.asSequence()
-        .filter { id -> id >= 0L && (validIds == null || id in validIds) }
-        .distinct()
-        .take(limit)
-        .toList()
-}
-
-internal fun prependBoundedUniqueId(values: List<Long>, id: Long, limit: Int): List<Long> =
-    boundedUniqueIds(listOf(id) + values.filterNot { it == id }, limit)
-
-data class SavedPlaybackSession(
-    val songIds: List<Long>,
-    val positionMs: Long,
-    val shuffleEnabled: Boolean,
-    val repeatMode: Int,
-    val smartShuffleEnabled: Boolean = false,
-    val preserveQueueOrder: Boolean = false
-)
 
 /** Small private, on-device store for personal library data; no automatic sync or network transfer. */
 class LibraryStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences("tunelyst_library", Context.MODE_PRIVATE)
+    private val listeningStatsStore = ListeningStatsStore(preferences)
 
     @Synchronized fun favorites(): Set<Long> = readIds(KEY_FAVORITES).toSet()
 
@@ -125,43 +105,23 @@ class LibraryStore(context: Context) {
     fun recordListeningStart(songId: Long) {
         if (songId < 0L) return
         recordPlayed(songId, incrementCount = false)
-        val current = readListeningStats(songId)
-        writeListeningStats(
-            songId,
-            current.copy(starts = current.starts + 1L, lastStartedAtMs = System.currentTimeMillis())
-        )
+        listeningStatsStore.recordListeningStart(songId)
     }
 
     /** Persist only the newly heard portion; callers batch this instead of writing on every UI tick. */
     @Synchronized
     fun recordListeningProgress(songId: Long, listenedMsDelta: Long, sessionPercent: Float) {
-        if (songId < 0L) return
-        val current = readListeningStats(songId)
-        writeListeningStats(
-            songId,
-            current.copy(
-                listenedMs = current.listenedMs + listenedMsDelta.coerceAtLeast(0L),
-                lastListenedPercent = sessionPercent.takeIf(Float::isFinite)?.coerceIn(0f, 100f)
-                    ?: current.lastListenedPercent
-            )
-        )
+        listeningStatsStore.recordListeningProgress(songId, listenedMsDelta, sessionPercent)
     }
 
     @Synchronized
     fun recordListeningCompletion(songId: Long) {
-        if (songId < 0L) return
-        val current = readListeningStats(songId)
-        writeListeningStats(
-            songId,
-            current.copy(completions = current.completions + 1L, lastListenedPercent = 100f)
-        )
+        listeningStatsStore.recordListeningCompletion(songId)
     }
 
     @Synchronized
     fun recordListeningSkip(songId: Long) {
-        if (songId < 0L) return
-        val current = readListeningStats(songId)
-        writeListeningStats(songId, current.copy(skips = current.skips + 1L))
+        listeningStatsStore.recordListeningSkip(songId)
     }
 
     /** A play count is awarded once per listening session after its local threshold is reached. */
@@ -171,26 +131,17 @@ class LibraryStore(context: Context) {
         val counts = readLongMap(KEY_PLAY_COUNTS)
         counts[songId] = (counts[songId] ?: 0L) + 1L
         writeLongMap(KEY_PLAY_COUNTS, counts)
-        val current = readListeningStats(songId)
-        writeListeningStats(songId, current.copy(qualifiedPlays = current.qualifiedPlays + 1L))
+        listeningStatsStore.recordQualifiedPlay(songId)
         preferences.edit().putLong(KEY_LAST_PLAYED_AT, System.currentTimeMillis()).apply()
         return counts
     }
 
     @Synchronized
-    fun listeningStats(): Map<Long, TrackListeningStats> = buildMap {
-        preferences.all.keys.forEach { key ->
-            if (!key.startsWith(KEY_LISTENING_STATS_PREFIX)) return@forEach
-            val songId = key.removePrefix(KEY_LISTENING_STATS_PREFIX).toLongOrNull()?.takeIf { it >= 0L }
-                ?: return@forEach
-            put(songId, readListeningStats(songId))
-        }
-    }
+    fun listeningStats(): Map<Long, TrackListeningStats> = listeningStatsStore.listeningStats()
 
     /** Read one updated track record without rescanning every per-track SharedPreferences entry. */
     @Synchronized
-    fun listeningStatsFor(songId: Long): TrackListeningStats =
-        if (songId >= 0L) readListeningStats(songId) else TrackListeningStats()
+    fun listeningStatsFor(songId: Long): TrackListeningStats = listeningStatsStore.listeningStatsFor(songId)
 
     @Synchronized fun lessLikeArtistNames(): Set<String> = readTasteNames(KEY_LESS_LIKE_ARTISTS)
     @Synchronized fun lessLikeGenreNames(): Set<String> = readTasteNames(KEY_LESS_LIKE_GENRES)
@@ -402,9 +353,7 @@ class LibraryStore(context: Context) {
         .put("saved_queues", savedQueuesJson(savedQueues()))
         .put("smart_playlists", smartPlaylistsJson(smartPlaylists()))
         .put("play_counts", longMapJson(playCounts()))
-        .put("listening_stats", JSONArray().apply {
-            listeningStats().forEach { (songId, stats) -> put(listeningStatsJson(songId, stats)) }
-        })
+        .put("listening_stats", listeningStatsStore.exportPortableStats())
         .put("less_like_artists", JSONArray(lessLikeArtistNames().sorted()))
         .put("less_like_genres", JSONArray(lessLikeGenreNames().sorted()))
         .put("last_played_at_ms", preferences.getLong(KEY_LAST_PLAYED_AT, 0L))
@@ -429,64 +378,9 @@ class LibraryStore(context: Context) {
             .putString(KEY_PLAY_COUNTS, data.optJSONObject("play_counts")?.toString() ?: "{}")
             .putLong(KEY_LAST_PLAYED_AT, data.optLong("last_played_at_ms", 0L).coerceAtLeast(0L))
             .putString(KEY_METADATA_OVERRIDES, data.optJSONArray("metadata_overrides")?.toString() ?: "[]")
-        preferences.all.keys.filter { it.startsWith(KEY_LISTENING_STATS_PREFIX) }.forEach(editor::remove)
-        val listeningStats = data.optJSONArray("listening_stats")
-        for (index in 0 until (listeningStats?.length() ?: 0)) {
-            val item = listeningStats?.optJSONObject(index) ?: continue
-            val songId = item.optLong("id", -1L)
-            if (songId >= 0L) editor.putString(listeningStatsKey(songId), statsPayload(item).toString())
-        }
+        listeningStatsStore.addPortableImport(editor, data.optJSONArray("listening_stats"))
         editor.apply()
     }
-
-    private fun readListeningStats(songId: Long): TrackListeningStats = runCatching {
-        val json = JSONObject(preferences.getString(listeningStatsKey(songId), "{}") ?: "{}")
-        TrackListeningStats(
-            starts = json.optLong("starts", 0L).coerceAtLeast(0L),
-            listenedMs = json.optLong("listened_ms", 0L).coerceAtLeast(0L),
-            completions = json.optLong("completions", 0L).coerceAtLeast(0L),
-            skips = json.optLong("skips", 0L).coerceAtLeast(0L),
-            qualifiedPlays = json.optLong("qualified_plays", 0L).coerceAtLeast(0L),
-            lastListenedPercent = json.optDouble("last_percent", 0.0).toFloat().coerceIn(0f, 100f),
-            lastStartedAtMs = json.optLong("last_started_at_ms", 0L).coerceAtLeast(0L)
-        )
-    }.getOrDefault(TrackListeningStats())
-
-    private fun writeListeningStats(songId: Long, stats: TrackListeningStats) {
-        preferences.edit().putString(
-            listeningStatsKey(songId),
-            JSONObject()
-                .put("starts", stats.starts.coerceAtLeast(0L))
-                .put("listened_ms", stats.listenedMs.coerceAtLeast(0L))
-                .put("completions", stats.completions.coerceAtLeast(0L))
-                .put("skips", stats.skips.coerceAtLeast(0L))
-                .put("qualified_plays", stats.qualifiedPlays.coerceAtLeast(0L))
-                .put("last_percent", stats.lastListenedPercent.takeIf(Float::isFinite)?.coerceIn(0f, 100f) ?: 0f)
-                .put("last_started_at_ms", stats.lastStartedAtMs.coerceAtLeast(0L))
-                .toString()
-        ).apply()
-    }
-
-    private fun listeningStatsJson(songId: Long, stats: TrackListeningStats): JSONObject = JSONObject()
-        .put("id", songId)
-        .put("starts", stats.starts)
-        .put("listened_ms", stats.listenedMs)
-        .put("completions", stats.completions)
-        .put("skips", stats.skips)
-        .put("qualified_plays", stats.qualifiedPlays)
-        .put("last_percent", stats.lastListenedPercent)
-        .put("last_started_at_ms", stats.lastStartedAtMs)
-
-    private fun statsPayload(item: JSONObject): JSONObject = JSONObject()
-        .put("starts", item.optLong("starts", 0L).coerceAtLeast(0L))
-        .put("listened_ms", item.optLong("listened_ms", 0L).coerceAtLeast(0L))
-        .put("completions", item.optLong("completions", 0L).coerceAtLeast(0L))
-        .put("skips", item.optLong("skips", 0L).coerceAtLeast(0L))
-        .put("qualified_plays", item.optLong("qualified_plays", 0L).coerceAtLeast(0L))
-        .put("last_percent", item.optDouble("last_percent", 0.0).takeIf(Double::isFinite)?.coerceIn(0.0, 100.0) ?: 0.0)
-        .put("last_started_at_ms", item.optLong("last_started_at_ms", 0L).coerceAtLeast(0L))
-
-    private fun listeningStatsKey(songId: Long): String = KEY_LISTENING_STATS_PREFIX + songId
 
     private fun readTasteNames(key: String): Set<String> = preferences.getStringSet(key, emptySet())
         ?.map(String::trim)?.filter(String::isNotBlank)?.toSet().orEmpty()
@@ -573,7 +467,6 @@ class LibraryStore(context: Context) {
         const val KEY_PLAYBACK_SESSION = "playback_session_json"
         const val KEY_PLAY_COUNTS = "play_counts_json"
         const val KEY_LAST_PLAYED_AT = "last_played_at"
-        const val KEY_LISTENING_STATS_PREFIX = "listening_stats_"
         const val KEY_LESS_LIKE_ARTISTS = "less_like_artists"
         const val KEY_LESS_LIKE_GENRES = "less_like_genres"
         const val KEY_EXCLUDED_FOLDERS = "excluded_folders"

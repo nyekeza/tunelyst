@@ -8,6 +8,7 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import com.tunelyst.music.core.logic.normalizeTasteKey
 
 /** Minimal on-device cache for prebuilt Home mixes; only local track IDs and labels are stored. */
 data class CachedHomeMix(

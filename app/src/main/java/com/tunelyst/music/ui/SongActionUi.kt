@@ -70,8 +70,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.tunelyst.music.data.Song
-import com.tunelyst.music.data.normalizeTasteKey
-import com.tunelyst.music.data.normalizedGenreKeys
+import com.tunelyst.music.core.logic.normalizeTasteKey
+import com.tunelyst.music.core.logic.normalizedGenreKeys
 
 internal data class SongActionController(
     val markedSongIds: Set<Long>,

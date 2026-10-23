@@ -1,0 +1,30 @@
+package com.tunelyst.music.ui
+
+internal const val LIBRARY_CACHE_MAX_AGE_MS = 12L * 60L * 60L * 1000L
+internal const val MEDIA_STORE_CHANGE_DEBOUNCE_MS = 1_200L
+internal const val UNKNOWN_PLAYBACK_ID_BASE = Long.MIN_VALUE + 2_147_483_648L
+internal const val SESSION_SAVE_INTERVAL_MS = 5_000L
+internal const val SESSION_SAVE_POSITION_DELTA_MS = 4_000L
+internal const val LISTENING_SAMPLE_TICK_MS = 400L
+internal const val LISTENING_SAMPLE_INTERVAL_MS = 900L
+internal const val LISTENING_SAMPLE_TOLERANCE_MS = 1_500L
+internal const val LISTENING_PROGRESS_FLUSH_MS = 5_000L
+internal const val AUDIO_FEATURE_QUEUE_CAPACITY = 8
+internal const val AUDIO_FEATURE_IDLE_GRACE_MS = 5_000L
+internal const val AUDIO_FEATURE_PLAYBACK_POLL_MS = 1_000L
+internal const val MAX_SAVED_QUEUE = 100
+internal const val MAX_DISCOVERY_CANDIDATES = 500
+internal const val MAX_FAVORITE_SHUFFLE_SEEDS = 16
+internal const val MAX_RADIO_ARTIST_CANDIDATES = 120
+internal const val SMART_SHUFFLE_QUEUE_SIZE = 40
+internal const val SMART_SHUFFLE_LOOKAHEAD = 64
+internal const val MAX_SHUFFLE_FEATURE_WARMUP = 8
+internal const val MIN_AUDIO_TEMPO_CONFIDENCE = 0.12f
+internal const val RADIO_QUEUE_SIZE = 30
+internal const val MAX_REPLAY_GAIN_LOOKAHEAD = 64
+internal const val RECENT_TRACK_PENALTY_LIMIT = 12
+internal const val RECENT_TRACK_PENALTY_STEP = 0.6f
+internal const val VERY_FEW_RECENT_COOLDOWN_SIZE = 24
+internal const val VERY_FEW_RECENT_PENALTY_LIMIT = 60
+internal const val VERY_FEW_RECENT_PENALTY_STEP = 0.12f
+internal const val AUTO_SHUFFLE_RECENT_COOLDOWN_SIZE = 8

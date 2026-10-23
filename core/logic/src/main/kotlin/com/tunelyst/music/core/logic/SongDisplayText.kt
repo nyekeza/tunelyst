@@ -1,4 +1,4 @@
-package com.tunelyst.music.data
+package com.tunelyst.music.core.logic
 
 private val AUDIO_FILE_EXTENSION = Regex("(?i)\\.(?:aac|aif|aiff|alac|ape|dff|dsf|flac|m4a|m4b|m4p|mka|mp3|oga|ogg|opus|wav|wma|wv)$")
 private val REPEATED_WHITESPACE = Regex("\\s+")

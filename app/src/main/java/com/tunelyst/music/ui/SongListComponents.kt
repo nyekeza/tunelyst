@@ -1,7 +1,5 @@
 package com.tunelyst.music.ui
 
-import android.graphics.Bitmap
-import android.net.Uri
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -11,23 +9,17 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.basicMarquee
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -42,45 +34,26 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.ArrowForward
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Favorite
-import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.SkipNext
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -90,116 +63,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import coil.size.Precision
+
 import com.tunelyst.music.data.Song
 import com.tunelyst.music.data.formatTime
-
-private val CoverPalettes = listOf(
-    listOf(Color(0xFF6B4FD3), Color(0xFFE780B9)),
-    listOf(Color(0xFF247C85), Color(0xFFB5D67D)),
-    listOf(Color(0xFFDB795B), Color(0xFFFFC56D)),
-    listOf(Color(0xFF57467E), Color(0xFF80A9CD)),
-    listOf(Color(0xFF7D3E68), Color(0xFFD9838A))
-)
-
-@Composable
-fun AlbumArtwork(
-    artworkUri: Uri?,
-    title: String,
-    modifier: Modifier = Modifier,
-    shape: RoundedCornerShape = RoundedCornerShape(20.dp),
-    crossfade: Boolean = true
-) {
-    val palette = remember(title) { CoverPalettes[(title.hashCode().ushr(1)) % CoverPalettes.size] }
-    val motionEnabled = LocalTunelystMotionEnabled.current
-    val lowMemoryDevice = LocalTunelystLowMemoryDevice.current
-    val context = LocalContext.current
-    val artworkRequest = remember(artworkUri, context, crossfade, motionEnabled, lowMemoryDevice) {
-        artworkUri?.let {
-            ImageRequest.Builder(context)
-                .data(it)
-                .precision(Precision.INEXACT)
-                .allowHardware(!lowMemoryDevice)
-                .bitmapConfig(if (lowMemoryDevice) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
-                .crossfade(crossfade && motionEnabled && !lowMemoryDevice)
-                .build()
-        }
-    }
-    var artworkFailed by remember(artworkUri) { mutableStateOf(false) }
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .background(Brush.linearGradient(palette))
-    ) {
-        if (artworkRequest != null && !artworkFailed) {
-            AsyncImage(
-                model = artworkRequest,
-                contentDescription = "$title album artwork",
-                contentScale = ContentScale.Crop,
-                filterQuality = if (lowMemoryDevice) FilterQuality.Low else FilterQuality.Medium,
-                onError = { artworkFailed = true },
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            GeometricArtworkPlaceholder(palette = palette, seed = title.hashCode())
-        }
-    }
-}
-
-@Composable
-private fun GeometricArtworkPlaceholder(palette: List<Color>, seed: Int) {
-    Canvas(Modifier.fillMaxSize()) {
-        val side = minOf(size.width, size.height)
-        val first = palette.first()
-        val second = palette.last()
-        drawRect(Brush.linearGradient(listOf(first, second), start = Offset.Zero, end = Offset(size.width, size.height)))
-        drawCircle(
-            color = Color.White.copy(alpha = 0.13f),
-            radius = side * 0.43f,
-            center = Offset(size.width * 0.84f, size.height * 0.20f)
-        )
-        drawCircle(
-            color = first.copy(alpha = 0.42f),
-            radius = side * 0.40f,
-            center = Offset(size.width * 0.10f, size.height * 0.93f)
-        )
-        val diagonal = Path().apply {
-            moveTo(size.width * 0.50f, 0f)
-            lineTo(size.width, 0f)
-            lineTo(size.width, size.height * 0.52f)
-            lineTo(size.width * 0.26f, size.height)
-            lineTo(0f, size.height)
-            close()
-        }
-        drawPath(diagonal, color = Color.Black.copy(alpha = 0.19f))
-        val tile = side * 0.26f
-        val tileColor = Color.White.copy(alpha = if ((seed and 1) == 0) 0.21f else 0.15f)
-        drawRoundRect(
-            color = tileColor,
-            topLeft = Offset(size.width * 0.12f, size.height * 0.18f),
-            size = Size(tile, tile),
-            cornerRadius = CornerRadius(tile * 0.12f)
-        )
-        if ((seed and 1) == 0) {
-            drawRoundRect(
-                color = Color.White.copy(alpha = 0.10f),
-                topLeft = Offset(size.width * 0.49f, size.height * 0.59f),
-                size = Size(tile * 0.64f, tile * 0.64f),
-                cornerRadius = CornerRadius(tile * 0.16f)
-            )
-        } else {
-            val shard = Path().apply {
-                moveTo(size.width * 0.58f, size.height * 0.40f)
-                lineTo(size.width * 0.92f, size.height * 0.62f)
-                lineTo(size.width * 0.58f, size.height * 0.82f)
-                close()
-            }
-            drawPath(shard, color = Color.White.copy(alpha = 0.12f))
-        }
-    }
-}
 
 @Composable
 fun SectionHeading(
@@ -586,178 +452,5 @@ private fun NowPlayingBars(heights: List<Float>) {
                     .background(TunelystColors.Lime)
             )
         }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun MiniPlayer(
-    song: Song,
-    isPlaying: Boolean,
-    positionMs: Long,
-    durationMs: Long,
-    onOpen: () -> Unit,
-    onTogglePlayback: () -> Unit,
-    onNext: () -> Unit,
-    blendArtworkBackdrop: Boolean = false
-) {
-    val palette = LocalTunelystPalette.current
-    val compactLayout = isTunelystCompactViewport()
-    val veryCompactLayout = isTunelystVeryCompactViewport()
-    val targetProgress = if (durationMs > 0L) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
-    val expressiveMotionEnabled = LocalTunelystMotionEnabled.current
-    val progress by animateFloatAsState(
-        targetValue = targetProgress,
-        animationSpec = if (expressiveMotionEnabled) tween(180) else snap(),
-        label = "mini-player-progress"
-    )
-    val playInteraction = remember(song.id) { MutableInteractionSource() }
-    val nextInteraction = remember(song.id) { MutableInteractionSource() }
-    Surface(
-        color = if (blendArtworkBackdrop) {
-            TunelystColors.SurfaceRaised.copy(alpha = if (palette.isLight) 0.84f else 0.70f)
-        } else {
-            TunelystColors.SurfaceRaised
-        },
-        shape = RoundedCornerShape(18.dp),
-        modifier = Modifier.fillMaxWidth().padding(
-            start = if (compactLayout) 8.dp else 12.dp,
-            top = if (compactLayout) 4.dp else 6.dp,
-            end = if (compactLayout) 8.dp else 12.dp,
-            bottom = 0.dp
-        )
-    ) {
-        Box {
-            Row(
-                modifier = Modifier.fillMaxWidth().springyClickable(onClick = onOpen).padding(
-                    start = if (compactLayout) 7.dp else 9.dp,
-                    end = 4.dp,
-                    top = if (compactLayout) 5.dp else 8.dp,
-                    bottom = if (compactLayout) 5.dp else 8.dp
-                ),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                AnimatedContent(
-                    targetState = song,
-                    modifier = Modifier.weight(1f),
-                    transitionSpec = {
-                        if (expressiveMotionEnabled) {
-                            (scaleIn(initialScale = 0.96f, animationSpec = spring(dampingRatio = 0.76f, stiffness = 480f)) + fadeIn(tween(130))) togetherWith
-                                (scaleOut(targetScale = 0.97f, animationSpec = tween(100)) + fadeOut(tween(90)))
-                        } else EnterTransition.None togetherWith ExitTransition.None
-                    },
-                    label = "mini-player-track-change"
-                ) { displayedSong ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        AlbumArtwork(
-                            displayedSong.artworkUri,
-                            displayedSong.title,
-                            Modifier.size(if (veryCompactLayout) 34.dp else if (compactLayout) 38.dp else 43.dp),
-                            RoundedCornerShape(11.dp),
-                            crossfade = expressiveMotionEnabled
-                        )
-                        Column(modifier = Modifier.weight(1f).padding(horizontal = if (compactLayout) 8.dp else 10.dp)) {
-                            Text(
-                                displayedSong.title,
-                                color = TunelystColors.Text,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Clip,
-                                modifier = if (expressiveMotionEnabled) Modifier.fillMaxWidth().basicMarquee(iterations = Int.MAX_VALUE) else Modifier.fillMaxWidth()
-                            )
-                            Text(displayedSong.artist, color = TunelystColors.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-                IconButton(
-                    onClick = onTogglePlayback,
-                    modifier = Modifier.size(42.dp).springyPress(playInteraction),
-                    interactionSource = playInteraction
-                ) {
-                    AnimatedContent(
-                        targetState = isPlaying,
-                        transitionSpec = {
-                            if (expressiveMotionEnabled) {
-                                (scaleIn(initialScale = 0.74f, animationSpec = spring(dampingRatio = 0.46f, stiffness = 560f)) + fadeIn(tween(100))) togetherWith
-                                    (scaleOut(targetScale = 0.70f, animationSpec = tween(100)) + fadeOut(tween(80)))
-                            } else {
-                                EnterTransition.None togetherWith ExitTransition.None
-                            }
-                        },
-                        label = "mini-player-play-pause"
-                    ) { playing ->
-                        Icon(
-                            imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (playing) "Pause" else "Play",
-                            tint = TunelystColors.Text,
-                            modifier = Modifier.size(25.dp)
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = onNext,
-                    modifier = Modifier.size(40.dp).springyPress(nextInteraction),
-                    interactionSource = nextInteraction
-                ) {
-                    ExpressiveStateIcon(
-                        icon = Icons.Rounded.SkipNext,
-                        contentDescription = "Next track",
-                        tint = TunelystColors.Text,
-                        size = 22.dp,
-                        label = "mini-player-next-icon"
-                    )
-                }
-            }
-            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(2.dp).background(TunelystColors.Primary))
-        }
-    }
-}
-
-@Composable
-fun AccentButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    icon: @Composable (() -> Unit)? = null
-) {
-    Button(
-        onClick = onClick,
-        shape = RoundedCornerShape(16.dp),
-        modifier = modifier.heightIn(min = 48.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = TunelystColors.Primary,
-            contentColor = TunelystColors.OnPrimary
-        ),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp)
-    ) {
-        if (icon != null) {
-            icon()
-            Spacer(Modifier.width(7.dp))
-        }
-        Text(text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-    }
-}
-
-@Composable
-fun IconRoundButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    tint: Color = TunelystColors.Text,
-    size: Dp = 48.dp
-) {
-    FilledTonalIconButton(
-        onClick = onClick,
-        shape = CircleShape,
-        modifier = modifier.size(size),
-        colors = IconButtonDefaults.filledTonalIconButtonColors(
-            containerColor = TunelystColors.SurfaceRaised,
-            contentColor = tint
-        )
-    ) {
-        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(size * 0.46f))
     }
 }

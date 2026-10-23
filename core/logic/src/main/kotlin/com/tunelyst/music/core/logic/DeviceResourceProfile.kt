@@ -1,10 +1,10 @@
-package com.tunelyst.music.ui
+package com.tunelyst.music.core.logic
 
-internal const val LOW_MEMORY_HEAP_LIMIT_BYTES = 192L * 1024L * 1024L
-internal const val LOW_MEMORY_CLASS_LIMIT_MB = 192
+const val LOW_MEMORY_HEAP_LIMIT_BYTES = 192L * 1024L * 1024L
+const val LOW_MEMORY_CLASS_LIMIT_MB = 192
 
 /** Shared low-memory classification used by UI rendering and optional background analysis. */
-internal fun isTunelystLowMemoryDevice(
+fun isTunelystLowMemoryDevice(
     platformLowRam: Boolean,
     memoryClassMb: Int,
     maxHeapBytes: Long

@@ -3,8 +3,8 @@ package com.tunelyst.music.ui
 import com.tunelyst.music.data.CachedHomeMix
 import com.tunelyst.music.data.HomeMixCacheSnapshot
 import com.tunelyst.music.data.Song
-import com.tunelyst.music.data.normalizeTasteKey
-import com.tunelyst.music.data.normalizedGenreKeys
+import com.tunelyst.music.core.logic.normalizeTasteKey
+import com.tunelyst.music.core.logic.normalizedGenreKeys
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.ln
