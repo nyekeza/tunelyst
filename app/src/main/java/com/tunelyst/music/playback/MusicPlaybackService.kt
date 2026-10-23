@@ -50,6 +50,11 @@ class MusicPlaybackService : MediaSessionService() {
     internal lateinit var audioSettingsStore: AudioSettingsStore
     internal lateinit var audioManager: AudioManager
 
+    internal fun isForegroundPlayerInitialized(): Boolean = ::foregroundPlayer.isInitialized
+    internal fun isStandbyPlayerInitialized(): Boolean = ::standbyPlayer.isInitialized
+    internal fun isAudioSettingsStoreInitialized(): Boolean = ::audioSettingsStore.isInitialized
+    internal fun isAudioSettingsInitialized(): Boolean = ::audioSettings.isInitialized
+
     internal val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     internal val isDebuggableBuild: Boolean
         get() = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0

@@ -11,7 +11,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.tunelyst.music.data.AudioSettingsContract
 
 internal fun MusicPlaybackService.updateCrossfadeImpl() {
-    if (!::foregroundPlayer.isInitialized) return
+    if (!isForegroundPlayerInitialized()) return
     updateSleepTimerFadeState()
     if (sleepTimerFadeActive) {
         if (pendingManualTransition != null) {
@@ -35,7 +35,7 @@ internal fun MusicPlaybackService.updateCrossfadeImpl() {
 
     val player = foregroundPlayer
     if (!player.isPlaying || player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
-        if (crossfading && !player.playWhenReady && ::standbyPlayer.isInitialized) standbyPlayer.pause()
+        if (crossfading && !player.playWhenReady && isStandbyPlayerInitialized()) standbyPlayer.pause()
         return
     }
     val requestedMs = audioSettings.crossfadeSeconds * 1_000L
@@ -58,7 +58,7 @@ internal fun MusicPlaybackService.updateCrossfadeImpl() {
         prepareNextPlayer(nextIndex)
     }
     if (!crossfading && remainingMs in 1L..effectiveFadeMs && preparedNextIndex == nextIndex &&
-        ::standbyPlayer.isInitialized && standbyPlayer.playbackState == Player.STATE_READY
+        isStandbyPlayerInitialized() && standbyPlayer.playbackState == Player.STATE_READY
     ) {
         beginCrossfade(player.currentPosition, minOf(effectiveFadeMs, remainingMs), nextIndex)
     }
@@ -74,14 +74,14 @@ internal fun MusicPlaybackService.updateCrossfadeImpl() {
 }
 
 internal fun MusicPlaybackService.applyCrossfadeGainsImpl(progress: Float) {
-    if (!::standbyPlayer.isInitialized || !::foregroundPlayer.isInitialized) return
+    if (!isStandbyPlayerInitialized() || !isForegroundPlayerInitialized()) return
     val gains = crossfadeGains(progress, audioSettings.crossfadeCurve)
     foregroundPlayer.volume = gains.outgoing
     standbyPlayer.volume = gains.incoming
 }
 
 internal fun MusicPlaybackService.updateManualCrossfadeImpl() {
-    if (!::standbyPlayer.isInitialized || !foregroundPlayer.isPlaying || !standbyPlayer.isPlaying) return
+    if (!isStandbyPlayerInitialized() || !foregroundPlayer.isPlaying || !standbyPlayer.isPlaying) return
     resumeManualFadeClockIfPlaying()
     if (manualFadeStartedAtElapsedMs == 0L) return
     val elapsedMs = manualFadeElapsedMs +
@@ -123,7 +123,7 @@ internal fun MusicPlaybackService.requestManualTransitionToIndexImpl(index: Int,
 }
 
 internal fun MusicPlaybackService.transitionToQueueImpl(request: PlaybackTransitionRequest): Boolean {
-    if (!::foregroundPlayer.isInitialized || request.mediaItems.isEmpty() ||
+    if (!isForegroundPlayerInitialized() || request.mediaItems.isEmpty() ||
         request.startIndex !in request.mediaItems.indices
     ) return false
     val source = foregroundPlayer
@@ -208,7 +208,7 @@ internal fun MusicPlaybackService.maybeBeginManualTransitionImpl() {
         return
     }
     if (crossfadeCancelRestoreStartVolume != null) return
-    if (!::standbyPlayer.isInitialized || standbyPlayer.playbackState != Player.STATE_READY) return
+    if (!isStandbyPlayerInitialized() || standbyPlayer.playbackState != Player.STATE_READY) return
     if (foregroundPlayer.currentMediaItem?.mediaId != manualTransitionSourceMediaId ||
         !foregroundPlayer.isPlaying || !request.playWhenReady
     ) {
@@ -283,7 +283,7 @@ internal fun MusicPlaybackService.applyActiveManualTransitionImmediatelyImpl() {
 }
 
 internal fun MusicPlaybackService.applyQueueToForegroundImpl(request: PlaybackTransitionRequest, restoreVolume: Boolean) {
-    if (!::foregroundPlayer.isInitialized) return
+    if (!isForegroundPlayerInitialized()) return
     if (restoreVolume) {
         foregroundPlayer.volume = 1f
         clearCrossfadeCancelVolumeRestore()
@@ -301,7 +301,7 @@ internal fun MusicPlaybackService.applyQueueToForegroundImpl(request: PlaybackTr
 }
 
 internal fun MusicPlaybackService.applyManualTransitionImmediatelyImpl(request: PlaybackTransitionRequest, restoreVolume: Boolean) {
-    if (!::foregroundPlayer.isInitialized) return
+    if (!isForegroundPlayerInitialized()) return
     applyQueueToForeground(
         request.copy(playWhenReady = foregroundPlayer.playWhenReady),
         restoreVolume = restoreVolume
@@ -310,7 +310,7 @@ internal fun MusicPlaybackService.applyManualTransitionImmediatelyImpl(request: 
 
 internal fun MusicPlaybackService.resumeManualFadeClockIfPlayingImpl() {
     if (crossfadeKind != CrossfadeKind.MANUAL || manualFadeStartedAtElapsedMs != 0L ||
-        !foregroundPlayer.isPlaying || !::standbyPlayer.isInitialized || !standbyPlayer.isPlaying
+        !foregroundPlayer.isPlaying || !isStandbyPlayerInitialized() || !standbyPlayer.isPlaying
     ) return
     manualFadeStartedAtElapsedMs = SystemClock.elapsedRealtime()
     val remainingFadeMs = (fadeDurationMs - manualFadeElapsedMs).coerceAtLeast(0L)
@@ -348,7 +348,7 @@ internal fun MusicPlaybackService.prepareNextPlayerImpl(nextIndex: Int) {
 }
 
 internal fun MusicPlaybackService.beginCrossfadeImpl(startPositionMs: Long, durationMs: Long, nextIndex: Int) {
-    if (durationMs <= 0L || !::standbyPlayer.isInitialized || standbyPlayer.playbackState != Player.STATE_READY) return
+    if (durationMs <= 0L || !isStandbyPlayerInitialized() || standbyPlayer.playbackState != Player.STATE_READY) return
     crossfading = true
     crossfadeKind = CrossfadeKind.AUTOMATIC
     fadeSourceIndex = foregroundPlayer.currentMediaItemIndex
@@ -407,7 +407,7 @@ internal fun MusicPlaybackService.cancelCrossfadeImpl(
     val hadManualTransition = crossfadeKind == CrossfadeKind.MANUAL ||
         pendingManualTransition != null || activeManualTransition != null
     if (hadManualTransition) lastManualTransitionDebugEvent = "cancel:$debugReason"
-    val volumeBeforeCancel = if (::foregroundPlayer.isInitialized) foregroundPlayer.volume else 1f
+    val volumeBeforeCancel = if (isForegroundPlayerInitialized()) foregroundPlayer.volume else 1f
     targetMediaId?.let { CrossfadeDisplayState.clearIncoming(it) }
     crossfading = false
     crossfadeKind = null
@@ -420,7 +420,7 @@ internal fun MusicPlaybackService.cancelCrossfadeImpl(
     clearManualTransitionTimeout()
     manualFadeElapsedMs = 0L
     manualFadeStartedAtElapsedMs = 0L
-    if (restoreVolume && ::foregroundPlayer.isInitialized) {
+    if (restoreVolume && isForegroundPlayerInitialized()) {
         if (smoothRestore && wasCrossfading && volumeBeforeCancel < 0.999f) {
             crossfadeCancelRestoreStartVolume = volumeBeforeCancel.coerceIn(0f, 1f)
             crossfadeCancelRestoreStartedAtMs = SystemClock.elapsedRealtime()
@@ -431,7 +431,7 @@ internal fun MusicPlaybackService.cancelCrossfadeImpl(
     } else {
         clearCrossfadeCancelVolumeRestore()
     }
-    if (::standbyPlayer.isInitialized) {
+    if (isStandbyPlayerInitialized()) {
         standbyPlayer.pause()
         standbyPlayer.stop()
         standbyPlayer.clearMediaItems()
@@ -464,7 +464,7 @@ internal fun MusicPlaybackService.clearCrossfadeCancelVolumeRestoreImpl() {
 
 internal fun MusicPlaybackService.clearPreparedPlayerImpl() {
     if (crossfading) return
-    if (::standbyPlayer.isInitialized) {
+    if (isStandbyPlayerInitialized()) {
         standbyPlayer.pause()
         standbyPlayer.stop()
         standbyPlayer.clearMediaItems()

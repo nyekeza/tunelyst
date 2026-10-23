@@ -12,7 +12,7 @@ import kotlin.math.ln
 import kotlin.math.roundToInt
 
 internal fun MusicPlaybackService.refreshDeviceEqualizerProfileImpl() {
-    if (!::audioSettingsStore.isInitialized || !::foregroundPlayer.isInitialized) return
+    if (!isAudioSettingsStoreInitialized() || !isForegroundPlayerInitialized()) return
     audioSettings = readAudioSettings()
     applyEqualizerSettings()
 }
@@ -78,21 +78,21 @@ internal fun MusicPlaybackService.applyEqualizerSettingsImpl() {
         }
         return
     }
-    if (::foregroundPlayer.isInitialized) ensureEqualizerAttached(foregroundPlayer)
-    if (::standbyPlayer.isInitialized) ensureEqualizerAttached(standbyPlayer)
+    if (isForegroundPlayerInitialized()) ensureEqualizerAttached(foregroundPlayer)
+    if (isStandbyPlayerInitialized()) ensureEqualizerAttached(standbyPlayer)
 }
 
 internal fun MusicPlaybackService.applyPlaybackParametersImpl() {
-    if (!::foregroundPlayer.isInitialized) return
+    if (!isForegroundPlayerInitialized()) return
     val parameters = PlaybackParameters(audioSettings.playbackSpeed, audioSettings.playbackPitch)
     foregroundPlayer.setPlaybackParameters(parameters)
-    if (::standbyPlayer.isInitialized) standbyPlayer.setPlaybackParameters(parameters)
+    if (isStandbyPlayerInitialized()) standbyPlayer.setPlaybackParameters(parameters)
 }
 
 internal fun MusicPlaybackService.applyLoudnessSettingsImpl() {
-    if (!::foregroundPlayer.isInitialized) return
+    if (!isForegroundPlayerInitialized()) return
     applyReplayGain(foregroundPlayer, foregroundPlayer.currentMediaItem)
-    if (::standbyPlayer.isInitialized) applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
+    if (isStandbyPlayerInitialized()) applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
 }
 
 internal fun MusicPlaybackService.applyReplayGainImpl(target: ExoPlayer, item: MediaItem?) {

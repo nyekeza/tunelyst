@@ -15,7 +15,7 @@ import androidx.media3.exoplayer.ExoPlayer
 
 internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
     val source = foregroundPlayer
-    val standby = if (::standbyPlayer.isInitialized) standbyPlayer else null
+    val standby = if (isStandbyPlayerInitialized()) standbyPlayer else null
     val standbyState = standby?.let {
         "${it.currentMediaItem?.mediaId}/${it.playbackState}/${it.playWhenReady}/${it.isPlaying}/${it.currentPosition}"
     } ?: "uninitialized"
@@ -29,7 +29,7 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
 }
 
 internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
-    if (!::foregroundPlayer.isInitialized) return
+    if (!isForegroundPlayerInitialized()) return
     val player = foregroundPlayer
     val now = SystemClock.elapsedRealtime()
     val shouldBeAudiblyPlaying = player.playWhenReady &&
@@ -59,10 +59,10 @@ internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
 }
 
 internal fun MusicPlaybackService.ensureStandbyPlayerImpl(): ExoPlayer {
-    if (!::standbyPlayer.isInitialized) {
+    if (!isStandbyPlayerInitialized()) {
         standbyPlayer = createPlayer(handleAudioFocus = false)
         installListener(standbyPlayer)
-        if (::audioSettings.isInitialized) {
+        if (isAudioSettingsInitialized()) {
             standbyPlayer.setPlaybackParameters(PlaybackParameters(audioSettings.playbackSpeed, audioSettings.playbackPitch))
             applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
         }
@@ -85,7 +85,7 @@ internal fun MusicPlaybackService.installListenerImpl(target: ExoPlayer) {
             if (playbackState == Player.STATE_READY && audioSettings.equalizerEnabled) {
                 ensureEqualizerAttached(target)
             }
-            if (::standbyPlayer.isInitialized && target === standbyPlayer && playbackState == Player.STATE_READY) {
+            if (isStandbyPlayerInitialized() && target === standbyPlayer && playbackState == Player.STATE_READY) {
                 if (pendingManualTransition != null) maybeBeginManualTransition()
                 else if (!crossfading && preparedNextIndex != C.INDEX_UNSET) updateCrossfade()
             }
@@ -165,7 +165,7 @@ internal fun MusicPlaybackService.installListenerImpl(target: ExoPlayer) {
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (isPlaying && audioSettings.equalizerEnabled) ensureEqualizerAttached(target)
-            if (target === foregroundPlayer && crossfading && ::standbyPlayer.isInitialized) {
+            if (target === foregroundPlayer && crossfading && isStandbyPlayerInitialized()) {
                 if (isPlaying) {
                     standbyPlayer.play()
                     resumeManualFadeClockIfPlaying()
@@ -173,13 +173,13 @@ internal fun MusicPlaybackService.installListenerImpl(target: ExoPlayer) {
                     pauseManualFadeClock()
                     standbyPlayer.pause()
                 }
-            } else if (::standbyPlayer.isInitialized && target === standbyPlayer &&
+            } else if (isStandbyPlayerInitialized() && target === standbyPlayer &&
                 crossfading && crossfadeKind == CrossfadeKind.MANUAL
             ) {
                 if (isPlaying) resumeManualFadeClockIfPlaying() else pauseManualFadeClock()
             }
             if (target === foregroundPlayer && !isPlaying && pendingManualTransition != null &&
-                ::standbyPlayer.isInitialized && standbyPlayer.playbackState == Player.STATE_READY
+                isStandbyPlayerInitialized() && standbyPlayer.playbackState == Player.STATE_READY
             ) {
                 applyPendingManualTransitionImmediately()
             }
@@ -225,7 +225,7 @@ internal fun MusicPlaybackService.recoverPlaybackAfterErrorImpl(target: ExoPlaye
     val failedItemId = target.currentMediaItem?.mediaId
     if (target !== foregroundPlayer) {
         Log.w("TunelystPlayback", "Standby player failed for $failedItemId; preserving foreground playback", error)
-        if (::standbyPlayer.isInitialized && target === standbyPlayer) {
+        if (isStandbyPlayerInitialized() && target === standbyPlayer) {
             val manualRequest = pendingManualTransition ?: activeManualTransition
             if (manualRequest != null) {
                 cancelCrossfade(restoreVolume = !sleepTimerFadeActive, smoothRestore = true)
@@ -261,7 +261,7 @@ internal fun MusicPlaybackService.recoverPlaybackAfterErrorImpl(target: ExoPlaye
         lateinit var retry: Runnable
         retry = Runnable {
             pendingPlaybackErrorRecoveries.remove(retry)
-            val retryStillApplies = ::foregroundPlayer.isInitialized && target === foregroundPlayer &&
+            val retryStillApplies = isForegroundPlayerInitialized() && target === foregroundPlayer &&
                 target.currentMediaItemIndex == failedIndex && target.currentMediaItem?.mediaId == failedItemId &&
                 target.playWhenReady && target.playbackState == Player.STATE_IDLE
             if (retryStillApplies) {

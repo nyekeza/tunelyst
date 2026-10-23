@@ -28,7 +28,7 @@ internal fun MusicPlaybackService.updateSleepTimerFadeStateImpl() {
     if (active == sleepTimerFadeActive) return
     val wasActive = sleepTimerFadeActive
     sleepTimerFadeActive = active
-    if (active && ::foregroundPlayer.isInitialized) {
+    if (active && isForegroundPlayerInitialized()) {
         val manualRequest = pendingManualTransition ?: activeManualTransition
         if (manualRequest != null) {
             cancelCrossfade(restoreVolume = false)
@@ -38,14 +38,14 @@ internal fun MusicPlaybackService.updateSleepTimerFadeStateImpl() {
             // Sleep-timer gain is the active owner of the foreground volume; never restore it to 1 here.
             cancelCrossfade(restoreVolume = false)
         }
-    } else if (!active && wasActive && sleepTimerVolumeApplied && ::foregroundPlayer.isInitialized) {
+    } else if (!active && wasActive && sleepTimerVolumeApplied && isForegroundPlayerInitialized()) {
         foregroundPlayer.volume = 1f
         sleepTimerVolumeApplied = false
     }
 }
 
 internal fun MusicPlaybackService.updateSleepTimerImpl() {
-    if (sleepTimerEndElapsedMs <= 0L || !::foregroundPlayer.isInitialized) return
+    if (sleepTimerEndElapsedMs <= 0L || !isForegroundPlayerInitialized()) return
     val remainingMs = sleepTimerEndElapsedMs - SystemClock.elapsedRealtime()
     if (sleepTimerFadeOutMs > 0L && remainingMs in 1L..sleepTimerFadeOutMs) {
         updateSleepTimerFadeState()
@@ -57,7 +57,7 @@ internal fun MusicPlaybackService.updateSleepTimerImpl() {
     if (crossfading || preparedNextIndex != C.INDEX_UNSET || pendingManualTransition != null) {
         cancelCrossfade(restoreVolume = false)
     }
-    if (::standbyPlayer.isInitialized) {
+    if (isStandbyPlayerInitialized()) {
         standbyPlayer.pause()
         standbyPlayer.volume = 1f
     }
