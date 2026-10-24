@@ -168,9 +168,31 @@ jobs:
           emulator-boot-timeout: 1200
           disable-animations: true
           emulator-options: '-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim'
-          script: >-
-            bash -o pipefail -c 'bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace 2>&1 |
-            tee "$RUNNER_TEMP/connectedDebugAndroidTest.log"'
+          script: |
+            bash -o pipefail -c '
+            set -euo pipefail
+            combined_log="$RUNNER_TEMP/connectedDebugAndroidTest.log"
+            : > "$combined_log"
+            for attempt in 1 2; do
+              attempt_log="$RUNNER_TEMP/connectedDebugAndroidTest-attempt-${attempt}.log"
+              set +e
+              bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace 2>&1 | tee "$attempt_log"
+              status=${PIPESTATUS[0]}
+              set -e
+              cat "$attempt_log" >> "$combined_log"
+              if [[ "$status" -eq 0 ]]; then
+                exit 0
+              fi
+              if [[ "$attempt" -eq 1 ]] && grep -q "No compatible devices connected" "$attempt_log"; then
+                echo "::warning title=Emulator retry::Retrying instrumentation once after a transient incompatible-device report."
+                adb devices -l || true
+                adb wait-for-device
+                sleep 15
+                continue
+              fi
+              exit "$status"
+            done
+            '
       - name: Report instrumented test failures
         if: always()
         shell: bash
