@@ -19,10 +19,17 @@ internal fun MusicPlaybackService.refreshDeviceEqualizerProfileImpl() {
 
 internal fun MusicPlaybackService.attachEqualizerImpl(target: ExoPlayer, audioSessionId: Int) {
     if (audioSessionId <= 0) {
+        audioSessionIds.remove(target)
         releaseEqualizer(target)
         return
     }
     audioSessionIds[target] = audioSessionId
+    if (!audioSettings.equalizerEnabled) {
+        // A disabled effect still allocates a native audio-fx instance on several devices.
+        // Keep only the session id so enabling EQ later can attach lazily.
+        releaseEqualizer(target)
+        return
+    }
 
     val existing = equalizers[target]
     val existingHasControl = existing?.let { runCatching { it.hasControl() }.getOrDefault(false) } == true
@@ -62,20 +69,48 @@ internal fun MusicPlaybackService.ensureEqualizerAttachedImpl(target: ExoPlayer)
 }
 
 internal fun MusicPlaybackService.attachLoudnessEnhancerImpl(target: ExoPlayer, audioSessionId: Int) {
-    if (audioSessionId <= 0) return
-    loudnessEnhancers.remove(target)?.let { runCatching { it.release() } }
+    if (audioSessionId <= 0) {
+        audioSessionIds.remove(target)
+        releaseLoudnessEnhancer(target)
+        return
+    }
+    audioSessionIds[target] = audioSessionId
+    if (!audioSettings.normalizeVolume) {
+        // Like Equalizer, LoudnessEnhancer owns native audio-fx state even while disabled.
+        releaseLoudnessEnhancer(target)
+        return
+    }
+
+    val existing = loudnessEnhancers[target]
+    if (existing != null && loudnessEnhancerSessionIds[target] == audioSessionId) {
+        applyReplayGain(target, target.currentMediaItem)
+        return
+    }
+    releaseLoudnessEnhancer(target)
     val effect = runCatching { LoudnessEnhancer(audioSessionId) }.getOrNull() ?: return
     loudnessEnhancers[target] = effect
-    appliedReplayGainByPlayer.remove(target)
+    loudnessEnhancerSessionIds[target] = audioSessionId
     applyReplayGain(target, target.currentMediaItem)
+}
+
+internal fun MusicPlaybackService.releaseLoudnessEnhancerImpl(target: ExoPlayer) {
+    loudnessEnhancers.remove(target)?.let { runCatching { it.release() } }
+    loudnessEnhancerSessionIds.remove(target)
+    appliedReplayGainByPlayer.remove(target)
+}
+
+internal fun MusicPlaybackService.ensureLoudnessEnhancerAttachedImpl(target: ExoPlayer) {
+    if (!audioSettings.normalizeVolume) {
+        releaseLoudnessEnhancer(target)
+        return
+    }
+    val sessionId = audioSessionIds[target] ?: return
+    attachLoudnessEnhancer(target, sessionId)
 }
 
 internal fun MusicPlaybackService.applyEqualizerSettingsImpl() {
     if (!audioSettings.equalizerEnabled) {
-        equalizers.values.forEach { effect ->
-            runCatching { effect.enabled = false }
-                .onFailure { Log.w("TunelystPlayback", "Failed to disable device equalizer", it) }
-        }
+        equalizers.keys.toList().forEach(::releaseEqualizer)
         return
     }
     if (isForegroundPlayerInitialized()) ensureEqualizerAttached(foregroundPlayer)
@@ -90,9 +125,13 @@ internal fun MusicPlaybackService.applyPlaybackParametersImpl() {
 }
 
 internal fun MusicPlaybackService.applyLoudnessSettingsImpl() {
+    if (!audioSettings.normalizeVolume) {
+        loudnessEnhancers.keys.toList().forEach(::releaseLoudnessEnhancer)
+        return
+    }
     if (!isForegroundPlayerInitialized()) return
-    applyReplayGain(foregroundPlayer, foregroundPlayer.currentMediaItem)
-    if (isStandbyPlayerInitialized()) applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
+    ensureLoudnessEnhancerAttached(foregroundPlayer)
+    if (isStandbyPlayerInitialized()) ensureLoudnessEnhancerAttached(standbyPlayer)
 }
 
 internal fun MusicPlaybackService.applyReplayGainImpl(target: ExoPlayer, item: MediaItem?) {

@@ -73,6 +73,7 @@ class MusicPlaybackService : MediaSessionService() {
     internal val equalizers = mutableMapOf<ExoPlayer, Equalizer>()
     internal val equalizerSessionIds = mutableMapOf<ExoPlayer, Int>()
     internal val loudnessEnhancers = mutableMapOf<ExoPlayer, LoudnessEnhancer>()
+    internal val loudnessEnhancerSessionIds = mutableMapOf<ExoPlayer, Int>()
     internal lateinit var audioSettings: SettingsSnapshot
     internal var crossfading = false
     internal var crossfadeKind: CrossfadeKind? = null
@@ -262,8 +263,8 @@ class MusicPlaybackService : MediaSessionService() {
         equalizers.clear()
         equalizerSessionIds.clear()
         audioSessionIds.clear()
-        loudnessEnhancers.values.forEach { runCatching { it.release() } }
-        loudnessEnhancers.clear()
+        loudnessEnhancers.keys.toList().forEach(::releaseLoudnessEnhancer)
+        loudnessEnhancerSessionIds.clear()
         appliedReplayGainByPlayer.clear()
         if (::mediaSession.isInitialized) mediaSession.release()
         if (::foregroundPlayer.isInitialized) foregroundPlayer.release()
@@ -441,6 +442,10 @@ class MusicPlaybackService : MediaSessionService() {
     internal fun ensureEqualizerAttached(target: ExoPlayer) = this.ensureEqualizerAttachedImpl(target)
 
     internal fun attachLoudnessEnhancer(target: ExoPlayer, audioSessionId: Int) = this.attachLoudnessEnhancerImpl(target, audioSessionId)
+
+    internal fun releaseLoudnessEnhancer(target: ExoPlayer) = this.releaseLoudnessEnhancerImpl(target)
+
+    internal fun ensureLoudnessEnhancerAttached(target: ExoPlayer) = this.ensureLoudnessEnhancerAttachedImpl(target)
 
     internal fun applyEqualizerSettings() = this.applyEqualizerSettingsImpl()
 

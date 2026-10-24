@@ -19,6 +19,11 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
     val standbyState = standby?.let {
         "${it.currentMediaItem?.mediaId}/${it.playbackState}/${it.playWhenReady}/${it.isPlaying}/${it.currentPosition}"
     } ?: "uninitialized"
+    val sourceEffects = "${equalizers.containsKey(source)}/${loudnessEnhancers.containsKey(source)}"
+    val standbyEffects = standby?.let {
+        "${equalizers.containsKey(it)}/${loudnessEnhancers.containsKey(it)}"
+    } ?: "uninitialized"
+    val standbySessionId = standby?.let { audioSessionIds[it] ?: 0 } ?: 0
     return "event=$lastManualTransitionDebugEvent;standbyGeneration=$standbyPlayerGeneration;" +
         "pending=${pendingManualTransition != null};active=${activeManualTransition != null};" +
         "crossfade=$crossfading/$crossfadeKind;" +
@@ -26,7 +31,9 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
         "${source.playbackState}/${source.playWhenReady}/${source.isPlaying}/${source.currentPosition};" +
         "standby=$standbyState;fade=$manualFadeElapsedMs/$fadeDurationMs;" +
         "started=$manualFadeStartedAtElapsedMs;timeout=${manualTransitionTimeout != null};" +
-        "prepared=$preparedNextIndex"
+        "prepared=$preparedNextIndex;sessions=${audioSessionIds[source] ?: 0}/$standbySessionId;" +
+        "effects=eq${equalizers.size}/le${loudnessEnhancers.size};" +
+        "sourceEffects=$sourceEffects;standbyEffects=$standbyEffects"
 }
 
 internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
@@ -93,8 +100,7 @@ internal fun MusicPlaybackService.recycleStandbyPlayerImpl() {
         runCatching { oldPlayer.removeListener(listener) }
     }
     releaseEqualizer(oldPlayer)
-    loudnessEnhancers.remove(oldPlayer)?.let { runCatching { it.release() } }
-    appliedReplayGainByPlayer.remove(oldPlayer)
+    releaseLoudnessEnhancer(oldPlayer)
     audioSessionIds.remove(oldPlayer)
     runCatching { oldPlayer.release() }
         .onFailure { Log.w("TunelystPlayback", "Could not release the previous standby player", it) }

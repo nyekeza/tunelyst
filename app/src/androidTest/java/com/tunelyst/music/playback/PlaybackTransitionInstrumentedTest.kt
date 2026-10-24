@@ -32,6 +32,117 @@ import kotlin.math.sin
 class PlaybackTransitionInstrumentedTest {
     @OptIn(UnstableApi::class)
     @Test
+    fun ordinaryTrackSwitchesDoNotAttachDisabledAudioEffects() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val settings = AudioSettingsStore(context)
+        val originalSettings = settings.read()
+        val wavFiles = listOf(
+            createWaveFile(context.cacheDir, "ordinary-source", 261.63),
+            createWaveFile(context.cacheDir, "ordinary-next", 329.63),
+            createWaveFile(context.cacheDir, "ordinary-final", 392.00)
+        )
+        settings.setCrossfadeSeconds(0)
+        settings.setManualSkipFadeSeconds(0)
+        settings.setEqualizerEnabled(false)
+        settings.setNormalizeVolume(false)
+        val controllerFuture = MediaController.Builder(
+            context,
+            androidx.media3.session.SessionToken(
+                context,
+                ComponentName(context, MusicPlaybackService::class.java)
+            )
+        ).buildAsync()
+        var controller: MediaController? = null
+
+        try {
+            val connectedController = controllerFuture.get(30, TimeUnit.SECONDS)
+            controller = connectedController
+            runOnMainSync(instrumentation) {
+                connectedController.stop()
+                connectedController.repeatMode = Player.REPEAT_MODE_OFF
+                connectedController.shuffleModeEnabled = false
+                connectedController.setMediaItems(
+                    listOf(
+                        mediaItem("ordinary-0", wavFiles[0]),
+                        mediaItem("ordinary-1", wavFiles[1]),
+                        mediaItem("ordinary-2", wavFiles[2])
+                    ),
+                    0,
+                    0L
+                )
+                connectedController.prepare()
+                connectedController.play()
+            }
+            awaitCondition(
+                instrumentation,
+                "ordinary source track did not start",
+                diagnostics = {
+                    "service=${transitionDebugState(instrumentation, connectedController)}"
+                }
+            ) {
+                runOnMainSync(instrumentation) {
+                    connectedController.currentMediaItem?.mediaId == "ordinary-0" && connectedController.isPlaying
+                }
+            }
+            awaitCondition(
+                instrumentation,
+                "ordinary source track did not create an audio session",
+                diagnostics = {
+                    "service=${transitionDebugState(instrumentation, connectedController)}"
+                }
+            ) {
+                hasActiveAudioSession(transitionDebugState(instrumentation, connectedController))
+            }
+            assertAudioEffectsDetached(instrumentation, connectedController)
+
+            runOnMainSync(instrumentation) { connectedController.seekToNextMediaItem() }
+            awaitCondition(
+                instrumentation,
+                "ordinary next-track switch did not finish",
+                diagnostics = {
+                    "service=${transitionDebugState(instrumentation, connectedController)}"
+                }
+            ) {
+                runOnMainSync(instrumentation) {
+                    connectedController.currentMediaItem?.mediaId == "ordinary-1" && connectedController.isPlaying
+                }
+            }
+            assertAudioEffectsDetached(instrumentation, connectedController)
+
+            runOnMainSync(instrumentation) { connectedController.seekToNextMediaItem() }
+            awaitCondition(
+                instrumentation,
+                "ordinary final-track switch did not finish",
+                diagnostics = {
+                    "service=${transitionDebugState(instrumentation, connectedController)}"
+                }
+            ) {
+                runOnMainSync(instrumentation) {
+                    connectedController.currentMediaItem?.mediaId == "ordinary-2" && connectedController.isPlaying
+                }
+            }
+            assertAudioEffectsDetached(instrumentation, connectedController)
+        } finally {
+            controller?.let { activeController ->
+                runCatching {
+                    runOnMainSync(instrumentation) {
+                        activeController.stop()
+                        activeController.clearMediaItems()
+                    }
+                }
+            }
+            runCatching { runOnMainSync(instrumentation) { MediaController.releaseFuture(controllerFuture) } }
+            runCatching { settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds) }
+            runCatching { settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds) }
+            runCatching { settings.setEqualizerEnabled(originalSettings.equalizerEnabled) }
+            runCatching { settings.setNormalizeVolume(originalSettings.normalizeVolume) }
+            wavFiles.forEach { runCatching { it.delete() } }
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    @Test
     fun manualAndAutomaticCrossfadesRecycleTheStandbyPlayerAcrossQueueTransitions() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -46,6 +157,8 @@ class PlaybackTransitionInstrumentedTest {
         // emulator can create the service with the old settings before the test writes them.
         settings.setCrossfadeSeconds(0)
         settings.setManualSkipFadeSeconds(1)
+        settings.setEqualizerEnabled(false)
+        settings.setNormalizeVolume(false)
         val controllerFuture = MediaController.Builder(
             context,
             androidx.media3.session.SessionToken(
@@ -140,6 +253,7 @@ class PlaybackTransitionInstrumentedTest {
                 "the standby player should be recreated after manual crossfade",
                 afterManualNextGeneration > initialStandbyGeneration
             )
+            assertAudioEffectsDetached(instrumentation, activeController)
 
             val replacementItems = listOf(
                 mediaItem("transition-source", wavFiles[0]),
@@ -171,6 +285,7 @@ class PlaybackTransitionInstrumentedTest {
                 "the standby player should be recreated after queue-replacement crossfade",
                 afterReplacementGeneration > afterManualNextGeneration
             )
+            assertAudioEffectsDetached(instrumentation, activeController)
 
             // Also cover automatic crossfades. Long clips plus an explicit seek give the standby
             // decoder time to prepare before the fade window, even on slow API 36 emulators.
@@ -221,7 +336,7 @@ class PlaybackTransitionInstrumentedTest {
             }
             awaitCondition(
                 instrumentation,
-                "automatic crossfade did not reach its first incoming track",
+                "first automatic crossfade did not recycle the standby player",
                 diagnostics = {
                     "mediaId=${currentMediaId(instrumentation, activeController)}, " +
                         "position=${currentPosition(instrumentation, activeController)}, " +
@@ -229,8 +344,10 @@ class PlaybackTransitionInstrumentedTest {
                 },
                 timeoutMs = 25_000L
             ) {
+                val state = transitionDebugState(instrumentation, activeController)
                 currentMediaId(instrumentation, activeController) == "automatic-1" &&
-                    currentPosition(instrumentation, activeController) >= 500L
+                    currentPosition(instrumentation, activeController) >= 500L &&
+                    standbyGeneration(state) > initialAutomaticGeneration
             }
             val afterFirstAutomaticGeneration = standbyGeneration(
                 transitionDebugState(instrumentation, activeController)
@@ -239,13 +356,14 @@ class PlaybackTransitionInstrumentedTest {
                 "the standby player should be recreated after the first automatic crossfade",
                 afterFirstAutomaticGeneration > initialAutomaticGeneration
             )
+            assertAudioEffectsDetached(instrumentation, activeController)
 
             runOnMainSync(instrumentation) {
                 activeController.seekTo(activeController.currentMediaItemIndex, 23_000L)
             }
             awaitCondition(
                 instrumentation,
-                "automatic crossfade did not reach its second incoming track",
+                "second automatic crossfade did not recycle the standby player",
                 diagnostics = {
                     "mediaId=${currentMediaId(instrumentation, activeController)}, " +
                         "position=${currentPosition(instrumentation, activeController)}, " +
@@ -253,8 +371,10 @@ class PlaybackTransitionInstrumentedTest {
                 },
                 timeoutMs = 25_000L
             ) {
+                val state = transitionDebugState(instrumentation, activeController)
                 currentMediaId(instrumentation, activeController) == "automatic-2" &&
-                    currentPosition(instrumentation, activeController) >= 500L
+                    currentPosition(instrumentation, activeController) >= 500L &&
+                    standbyGeneration(state) > afterFirstAutomaticGeneration
             }
             val afterSecondAutomaticGeneration = standbyGeneration(
                 transitionDebugState(instrumentation, activeController)
@@ -263,6 +383,7 @@ class PlaybackTransitionInstrumentedTest {
                 "the standby player should be recreated after the second automatic crossfade",
                 afterSecondAutomaticGeneration > afterFirstAutomaticGeneration
             )
+            assertAudioEffectsDetached(instrumentation, activeController)
             assertTrue("playback should continue on the final track", isPlaying(instrumentation, activeController))
         } finally {
             controller?.let { activeController ->
@@ -276,6 +397,8 @@ class PlaybackTransitionInstrumentedTest {
             runCatching { runOnMainSync(instrumentation) { MediaController.releaseFuture(controllerFuture) } }
             runCatching { settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds) }
             runCatching { settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds) }
+            runCatching { settings.setEqualizerEnabled(originalSettings.equalizerEnabled) }
+            runCatching { settings.setNormalizeVolume(originalSettings.normalizeVolume) }
             wavFiles.forEach { runCatching { it.delete() } }
         }
     }
@@ -312,6 +435,25 @@ class PlaybackTransitionInstrumentedTest {
         return future.get().get(5, TimeUnit.SECONDS).extras
             .getString(PlaybackTransitionProtocol.EXTRA_DEBUG_STATE)
             .orEmpty()
+    }
+
+    private fun hasActiveAudioSession(debugState: String): Boolean = debugState
+        .substringAfter("sessions=", "")
+        .substringBefore(';')
+        .substringBefore('/')
+        .toIntOrNull()
+        ?.let { it > 0 }
+        ?: false
+
+    private fun assertAudioEffectsDetached(
+        instrumentation: android.app.Instrumentation,
+        controller: MediaController
+    ) {
+        val debugState = transitionDebugState(instrumentation, controller)
+        assertTrue(
+            "disabled equalizer/loudness effects should not own native instances: $debugState",
+            debugState.contains("effects=eq0/le0")
+        )
     }
 
     private fun mediaItem(id: String, file: File): MediaItem = MediaItem.Builder()
