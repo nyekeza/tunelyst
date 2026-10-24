@@ -169,7 +169,7 @@ jobs:
           disable-animations: true
           emulator-options: '-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim'
           script: |
-            set -euo pipefail
+            bash -euo pipefail <<'BASH'
             combined_log="$RUNNER_TEMP/connectedDebugAndroidTest.log"
             : > "$combined_log"
             for attempt in 1 2; do
@@ -202,6 +202,7 @@ jobs:
               fi
               exit "$status"
             done
+            BASH
       - name: Report instrumented test failures
         if: always()
         shell: bash
