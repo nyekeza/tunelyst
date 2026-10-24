@@ -32,7 +32,7 @@ import kotlin.math.sin
 class PlaybackTransitionInstrumentedTest {
     @OptIn(UnstableApi::class)
     @Test
-    fun manualNextAndQueueReplacementOverlapBeforeTheSessionSwapsTracks() {
+    fun manualAndAutomaticCrossfadesRecycleTheStandbyPlayerAcrossQueueTransitions() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val settings = AudioSettingsStore(context)
@@ -171,17 +171,108 @@ class PlaybackTransitionInstrumentedTest {
                 "the standby player should be recreated after queue-replacement crossfade",
                 afterReplacementGeneration > afterManualNextGeneration
             )
-        } finally {
-            controller?.let { activeController ->
+
+            // Also cover automatic crossfades. Long clips plus an explicit seek give the standby
+            // decoder time to prepare before the fade window, even on slow API 36 emulators.
+            runOnMainSync(instrumentation) {
+                settings.setCrossfadeSeconds(4)
+                settings.setManualSkipFadeSeconds(0)
+                activeController.stop()
+                activeController.clearMediaItems()
+                activeController.repeatMode = Player.REPEAT_MODE_OFF
+                activeController.shuffleModeEnabled = false
+                activeController.setMediaItems(
+                    listOf(
+                        mediaItem("automatic-0", wavFiles[0]),
+                        mediaItem("automatic-1", wavFiles[1]),
+                        mediaItem("automatic-2", wavFiles[2])
+                    ),
+                    0,
+                    0L
+                )
+                activeController.prepare()
+                activeController.play()
+            }
+            awaitCondition(
+                instrumentation,
+                "automatic source track or its next queue item did not become available",
+                diagnostics = {
+                    runOnMainSync(instrumentation) {
+                        "id=${activeController.currentMediaItem?.mediaId}, " +
+                            "isPlaying=${activeController.isPlaying}, " +
+                            "position=${activeController.currentPosition}, " +
+                            "itemCount=${activeController.mediaItemCount}, " +
+                            "nextIndex=${activeController.nextMediaItemIndex}"
+                    }
+                }
+            ) {
                 runOnMainSync(instrumentation) {
-                    activeController.stop()
-                    activeController.clearMediaItems()
+                    activeController.currentMediaItem?.mediaId == "automatic-0" &&
+                        activeController.isPlaying &&
+                        activeController.mediaItemCount == 3 &&
+                        activeController.nextMediaItemIndex == 1
                 }
             }
-            runOnMainSync(instrumentation) { MediaController.releaseFuture(controllerFuture) }
-            settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds)
-            settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds)
-            wavFiles.forEach(File::delete)
+            val initialAutomaticGeneration = standbyGeneration(
+                transitionDebugState(instrumentation, activeController)
+            )
+            runOnMainSync(instrumentation) { activeController.seekTo(0, 23_000L) }
+            awaitCondition(
+                instrumentation,
+                "automatic crossfade did not reach its first incoming track",
+                diagnostics = {
+                    "mediaId=${currentMediaId(instrumentation, activeController)}, " +
+                        "position=${currentPosition(instrumentation, activeController)}, " +
+                        "service=${transitionDebugState(instrumentation, activeController)}"
+                },
+                timeoutMs = 25_000L
+            ) {
+                currentMediaId(instrumentation, activeController) == "automatic-1" &&
+                    currentPosition(instrumentation, activeController) >= 500L
+            }
+            val afterFirstAutomaticGeneration = standbyGeneration(
+                transitionDebugState(instrumentation, activeController)
+            )
+            assertTrue(
+                "the standby player should be recreated after the first automatic crossfade",
+                afterFirstAutomaticGeneration > initialAutomaticGeneration
+            )
+
+            runOnMainSync(instrumentation) { activeController.seekTo(0, 23_000L) }
+            awaitCondition(
+                instrumentation,
+                "automatic crossfade did not reach its second incoming track",
+                diagnostics = {
+                    "mediaId=${currentMediaId(instrumentation, activeController)}, " +
+                        "position=${currentPosition(instrumentation, activeController)}, " +
+                        "service=${transitionDebugState(instrumentation, activeController)}"
+                },
+                timeoutMs = 25_000L
+            ) {
+                currentMediaId(instrumentation, activeController) == "automatic-2" &&
+                    currentPosition(instrumentation, activeController) >= 500L
+            }
+            val afterSecondAutomaticGeneration = standbyGeneration(
+                transitionDebugState(instrumentation, activeController)
+            )
+            assertTrue(
+                "the standby player should be recreated after the second automatic crossfade",
+                afterSecondAutomaticGeneration > afterFirstAutomaticGeneration
+            )
+            assertTrue("playback should continue on the final track", isPlaying(instrumentation, activeController))
+        } finally {
+            controller?.let { activeController ->
+                runCatching {
+                    runOnMainSync(instrumentation) {
+                        activeController.stop()
+                        activeController.clearMediaItems()
+                    }
+                }
+            }
+            runCatching { runOnMainSync(instrumentation) { MediaController.releaseFuture(controllerFuture) } }
+            runCatching { settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds) }
+            runCatching { settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds) }
+            wavFiles.forEach { runCatching { it.delete() } }
         }
     }
 
@@ -278,9 +369,10 @@ class PlaybackTransitionInstrumentedTest {
         instrumentation: android.app.Instrumentation,
         failureMessage: String,
         diagnostics: (() -> String)? = null,
+        timeoutMs: Long = 15_000L,
         condition: () -> Boolean
     ) {
-        val deadline = SystemClock.elapsedRealtime() + 15_000L
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (condition()) return
             SystemClock.sleep(40L)
