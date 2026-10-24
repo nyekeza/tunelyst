@@ -216,7 +216,9 @@ class PlaybackTransitionInstrumentedTest {
             val initialAutomaticGeneration = standbyGeneration(
                 transitionDebugState(instrumentation, activeController)
             )
-            runOnMainSync(instrumentation) { activeController.seekTo(0, 23_000L) }
+            runOnMainSync(instrumentation) {
+                activeController.seekTo(activeController.currentMediaItemIndex, 23_000L)
+            }
             awaitCondition(
                 instrumentation,
                 "automatic crossfade did not reach its first incoming track",
@@ -238,7 +240,9 @@ class PlaybackTransitionInstrumentedTest {
                 afterFirstAutomaticGeneration > initialAutomaticGeneration
             )
 
-            runOnMainSync(instrumentation) { activeController.seekTo(0, 23_000L) }
+            runOnMainSync(instrumentation) {
+                activeController.seekTo(activeController.currentMediaItemIndex, 23_000L)
+            }
             awaitCondition(
                 instrumentation,
                 "automatic crossfade did not reach its second incoming track",
