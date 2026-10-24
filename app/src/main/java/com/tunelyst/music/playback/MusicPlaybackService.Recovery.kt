@@ -24,6 +24,12 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
         "${equalizers.containsKey(it)}/${loudnessEnhancers.containsKey(it)}"
     } ?: "uninitialized"
     val standbySessionId = standby?.let { audioSessionIds[it] ?: 0 } ?: 0
+    val sourceVideoDisabled = C.TRACK_TYPE_VIDEO in source.trackSelectionParameters.disabledTrackTypes
+    val standbyVideoDisabled = standby?.let {
+        C.TRACK_TYPE_VIDEO in it.trackSelectionParameters.disabledTrackTypes
+    } ?: false
+    val memoryGuardState = "$memoryGuardLastNativePssBytes/$memoryGuardThresholdBytes/" +
+        "$memoryGuardHighSamples/$memoryGuardRecycleCount"
     return "event=$lastManualTransitionDebugEvent;standbyGeneration=$standbyPlayerGeneration;" +
         "pending=${pendingManualTransition != null};active=${activeManualTransition != null};" +
         "crossfade=$crossfading/$crossfadeKind;" +
@@ -33,7 +39,9 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
         "started=$manualFadeStartedAtElapsedMs;timeout=${manualTransitionTimeout != null};" +
         "prepared=$preparedNextIndex;sessions=${audioSessionIds[source] ?: 0}/$standbySessionId;" +
         "effects=eq${equalizers.size}/le${loudnessEnhancers.size};" +
-        "sourceEffects=$sourceEffects;standbyEffects=$standbyEffects"
+        "sourceEffects=$sourceEffects;standbyEffects=$standbyEffects;" +
+        "videoDisabled=$sourceVideoDisabled/$standbyVideoDisabled;memory=$memoryGuardState;" +
+        "memoryBaselinePss=$memoryGuardBaselineNativePssBytes"
 }
 
 internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {

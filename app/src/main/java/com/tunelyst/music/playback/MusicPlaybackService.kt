@@ -50,6 +50,13 @@ class MusicPlaybackService : MediaSessionService() {
     internal lateinit var audioSettingsStore: AudioSettingsStore
     internal lateinit var audioManager: AudioManager
     internal var standbyPlayerGeneration = 0
+    internal var memoryGuardThresholdBytes = 0L
+    internal var memoryGuardBaselineNativePssBytes = 0L
+    internal var memoryGuardHighSamples = 0
+    internal var memoryGuardLastSampleElapsedMs = 0L
+    internal var memoryGuardLastRecycleElapsedMs = 0L
+    internal var memoryGuardLastNativePssBytes = 0L
+    internal var memoryGuardRecycleCount = 0
 
     internal fun isForegroundPlayerInitialized(): Boolean = ::foregroundPlayer.isInitialized
     internal fun isStandbyPlayerInitialized(): Boolean = ::standbyPlayer.isInitialized
@@ -117,7 +124,10 @@ class MusicPlaybackService : MediaSessionService() {
             val connection = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
             if (controller.packageName == packageName) {
                 val commands = defaults.buildUpon().add(PlaybackTransitionProtocol.transitionToQueueCommand)
-                if (isDebuggableBuild) commands.add(PlaybackTransitionProtocol.debugTransitionStateCommand)
+                if (isDebuggableBuild) {
+                    commands.add(PlaybackTransitionProtocol.debugTransitionStateCommand)
+                    commands.add(PlaybackTransitionProtocol.debugRecyclePlaybackCommand)
+                }
                 connection.setAvailableSessionCommands(commands.build())
             }
             return Futures.immediateFuture(connection.build())
@@ -142,6 +152,13 @@ class MusicPlaybackService : MediaSessionService() {
                     )
                 }
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS, extras))
+            }
+            if (isDebuggableBuild &&
+                customCommand.customAction == PlaybackTransitionProtocol.ACTION_DEBUG_RECYCLE_PLAYBACK
+            ) {
+                val recycled = recyclePlaybackPipelineForMemoryPressure()
+                val resultCode = if (recycled) SessionResult.RESULT_SUCCESS else SessionError.ERROR_BAD_VALUE
+                return Futures.immediateFuture(SessionResult(resultCode))
             }
             if (customCommand.customAction != PlaybackTransitionProtocol.ACTION_TRANSITION_TO_QUEUE) {
                 return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
@@ -189,6 +206,7 @@ class MusicPlaybackService : MediaSessionService() {
                     applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
                 }
                 updateCrossfade()
+                updatePlaybackMemoryGuard()
             }
             val nextDelayMs = when {
                 crossfadeCancelRestoreStartVolume != null -> CROSSFADE_CANCEL_RESTORE_TICK_MS
@@ -227,6 +245,7 @@ class MusicPlaybackService : MediaSessionService() {
             .setSessionActivity(sessionActivity)
             .build()
         runCatching { audioManager.registerAudioDeviceCallback(outputDeviceCallback, mainHandler) }
+        initializePlaybackMemoryGuard()
         mainHandler.post(crossfadeTicker)
     }
 
@@ -273,12 +292,20 @@ class MusicPlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
-    internal fun createPlayer(handleAudioFocus: Boolean): ExoPlayer = ExoPlayer.Builder(this)
-        .setAudioAttributes(musicAudioAttributes, handleAudioFocus)
-        .setHandleAudioBecomingNoisy(true)
-        // Keep the CPU awake while local files are decoded and transitions are serviced in background.
-        .setWakeMode(C.WAKE_MODE_LOCAL)
-        .build()
+    internal fun createPlayer(handleAudioFocus: Boolean): ExoPlayer {
+        val player = ExoPlayer.Builder(this)
+            .setAudioAttributes(musicAudioAttributes, handleAudioFocus)
+            .setHandleAudioBecomingNoisy(true)
+            // Keep the CPU awake while local files are decoded and transitions are serviced in background.
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build()
+        // Tunelyst is an audio-only player. Files with a video stream (for example, music videos
+        // indexed as audio) must not create a native video decoder when no video surface exists.
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+            .build()
+        return player
+    }
 
     /** Route controller track changes through the service so it can own both players' gain curves. */
     internal fun createSessionPlayer(target: ExoPlayer): Player = object : ForwardingPlayer(target) {
@@ -355,6 +382,13 @@ class MusicPlaybackService : MediaSessionService() {
 
     /** Recover only a genuine stuck-ready state; never override a user/system pause or audio-focus suppression. */
     internal fun recoverUnexpectedReadyPause() = this.recoverUnexpectedReadyPauseImpl()
+
+    internal fun initializePlaybackMemoryGuard() = this.initializePlaybackMemoryGuardImpl()
+
+    internal fun updatePlaybackMemoryGuard() = this.updatePlaybackMemoryGuardImpl()
+
+    internal fun recyclePlaybackPipelineForMemoryPressure(): Boolean =
+        this.recyclePlaybackPipelineForMemoryPressureImpl()
 
     internal fun ensureStandbyPlayer(): ExoPlayer = this.ensureStandbyPlayerImpl()
 

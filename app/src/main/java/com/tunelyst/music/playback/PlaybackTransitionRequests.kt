@@ -80,11 +80,13 @@ internal object PendingPlaybackTransitionRequests {
 internal object PlaybackTransitionProtocol {
     const val ACTION_TRANSITION_TO_QUEUE = "com.tunelyst.music.action.TRANSITION_TO_QUEUE"
     const val ACTION_GET_DEBUG_STATE = "com.tunelyst.music.action.GET_TRANSITION_DEBUG_STATE"
+    const val ACTION_DEBUG_RECYCLE_PLAYBACK = "com.tunelyst.music.action.DEBUG_RECYCLE_PLAYBACK"
     const val EXTRA_REQUEST_ID = "com.tunelyst.music.extra.TRANSITION_REQUEST_ID"
     const val EXTRA_DEBUG_STATE = "com.tunelyst.music.extra.TRANSITION_DEBUG_STATE"
 
     val transitionToQueueCommand = SessionCommand(ACTION_TRANSITION_TO_QUEUE, Bundle.EMPTY)
     val debugTransitionStateCommand = SessionCommand(ACTION_GET_DEBUG_STATE, Bundle.EMPTY)
+    val debugRecyclePlaybackCommand = SessionCommand(ACTION_DEBUG_RECYCLE_PLAYBACK, Bundle.EMPTY)
 }
 
 internal data class CrossfadeGains(val outgoing: Float, val incoming: Float)

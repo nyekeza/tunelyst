@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -122,6 +123,140 @@ class PlaybackTransitionInstrumentedTest {
                     connectedController.currentMediaItem?.mediaId == "ordinary-2" && connectedController.isPlaying
                 }
             }
+            assertAudioEffectsDetached(instrumentation, connectedController)
+
+            runOnMainSync(instrumentation) {
+                connectedController.repeatMode = Player.REPEAT_MODE_ALL
+                connectedController.shuffleModeEnabled = false
+            }
+            repeat(12) { switchIndex ->
+                val expectedId = "ordinary-${switchIndex % 3}"
+                runOnMainSync(instrumentation) { connectedController.seekToNextMediaItem() }
+                awaitCondition(
+                    instrumentation,
+                    "repeated ordinary track switch ${switchIndex + 1} did not finish",
+                    diagnostics = { "service=${transitionDebugState(instrumentation, connectedController)}" }
+                ) {
+                    runOnMainSync(instrumentation) {
+                        connectedController.currentMediaItem?.mediaId == expectedId && connectedController.isPlaying
+                    }
+                }
+                assertAudioEffectsDetached(instrumentation, connectedController)
+            }
+        } finally {
+            controller?.let { activeController ->
+                runCatching {
+                    runOnMainSync(instrumentation) {
+                        activeController.stop()
+                        activeController.clearMediaItems()
+                    }
+                }
+            }
+            runCatching { runOnMainSync(instrumentation) { MediaController.releaseFuture(controllerFuture) } }
+            runCatching { settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds) }
+            runCatching { settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds) }
+            runCatching { settings.setEqualizerEnabled(originalSettings.equalizerEnabled) }
+            runCatching { settings.setNormalizeVolume(originalSettings.normalizeVolume) }
+            wavFiles.forEach { runCatching { it.delete() } }
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    @Test
+    fun memoryGuardPipelineRecyclePreservesQueuePositionAndPlaybackState() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val settings = AudioSettingsStore(context)
+        val originalSettings = settings.read()
+        val wavFiles = listOf(
+            createWaveFile(context.cacheDir, "memory-guard-0", 261.63),
+            createWaveFile(context.cacheDir, "memory-guard-1", 329.63),
+            createWaveFile(context.cacheDir, "memory-guard-2", 392.00)
+        )
+        settings.setCrossfadeSeconds(0)
+        settings.setManualSkipFadeSeconds(0)
+        settings.setEqualizerEnabled(false)
+        settings.setNormalizeVolume(false)
+        val controllerFuture = MediaController.Builder(
+            context,
+            androidx.media3.session.SessionToken(
+                context,
+                ComponentName(context, MusicPlaybackService::class.java)
+            )
+        ).buildAsync()
+        var controller: MediaController? = null
+
+        try {
+            val connectedController = controllerFuture.get(30, TimeUnit.SECONDS)
+            controller = connectedController
+            runOnMainSync(instrumentation) {
+                connectedController.stop()
+                connectedController.clearMediaItems()
+                connectedController.repeatMode = Player.REPEAT_MODE_ALL
+                connectedController.shuffleModeEnabled = true
+                connectedController.setMediaItems(
+                    listOf(
+                        mediaItem("memory-guard-0", wavFiles[0]),
+                        mediaItem("memory-guard-1", wavFiles[1]),
+                        mediaItem("memory-guard-2", wavFiles[2])
+                    ),
+                    0,
+                    0L
+                )
+                connectedController.prepare()
+                connectedController.play()
+            }
+            awaitCondition(
+                instrumentation,
+                "memory-guard source track did not start",
+                diagnostics = { "service=${transitionDebugState(instrumentation, connectedController)}" }
+            ) {
+                runOnMainSync(instrumentation) {
+                    connectedController.currentMediaItem?.mediaId == "memory-guard-0" &&
+                        connectedController.isPlaying && connectedController.mediaItemCount == 3
+                }
+            }
+            assertAudioEffectsDetached(instrumentation, connectedController)
+            runOnMainSync(instrumentation) { connectedController.seekTo(5_000L) }
+            awaitCondition(instrumentation, "memory-guard test seek did not finish") {
+                currentPosition(instrumentation, connectedController) >= 5_000L &&
+                    isPlaying(instrumentation, connectedController)
+            }
+            val positionBeforeRecycle = currentPosition(instrumentation, connectedController)
+            val initialRecycleCount = memoryRecycleCount(transitionDebugState(instrumentation, connectedController))
+            val recycleFuture = AtomicReference<ListenableFuture<SessionResult>>()
+            runOnMainSync(instrumentation) {
+                recycleFuture.set(
+                    connectedController.sendCustomCommand(
+                        PlaybackTransitionProtocol.debugRecyclePlaybackCommand,
+                        Bundle.EMPTY
+                    )
+                )
+            }
+            assertEquals(
+                SessionResult.RESULT_SUCCESS,
+                recycleFuture.get().get(15, TimeUnit.SECONDS).resultCode
+            )
+            awaitCondition(
+                instrumentation,
+                "memory-guard recycle did not restore active playback",
+                diagnostics = { "service=${transitionDebugState(instrumentation, connectedController)}" },
+                timeoutMs = 20_000L
+            ) {
+                val state = transitionDebugState(instrumentation, connectedController)
+                runOnMainSync(instrumentation) {
+                    connectedController.currentMediaItem?.mediaId == "memory-guard-0" &&
+                        connectedController.isPlaying && connectedController.mediaItemCount == 3 &&
+                        connectedController.repeatMode == Player.REPEAT_MODE_ALL &&
+                        connectedController.shuffleModeEnabled
+                } && memoryRecycleCount(state) > initialRecycleCount
+            }
+
+            val positionAfterRecycle = currentPosition(instrumentation, connectedController)
+            assertTrue(
+                "pipeline recycle should resume near the saved position ($positionBeforeRecycle -> $positionAfterRecycle)",
+                positionAfterRecycle >= positionBeforeRecycle - 1_000L
+            )
             assertAudioEffectsDetached(instrumentation, connectedController)
         } finally {
             controller?.let { activeController ->
@@ -445,6 +580,7 @@ class PlaybackTransitionInstrumentedTest {
         ?.let { it > 0 }
         ?: false
 
+    @OptIn(UnstableApi::class)
     private fun assertAudioEffectsDetached(
         instrumentation: android.app.Instrumentation,
         controller: MediaController
@@ -453,6 +589,22 @@ class PlaybackTransitionInstrumentedTest {
         assertTrue(
             "disabled equalizer/loudness effects should not own native instances: $debugState",
             debugState.contains("effects=eq0/le0")
+        )
+        assertTrue(
+            "audio-only playback must keep video tracks disabled: $debugState",
+            debugState.contains("videoDisabled=true/")
+        )
+        if (!debugState.contains("standby=uninitialized")) {
+            assertTrue(
+                "an initialized standby player must also keep video tracks disabled: $debugState",
+                debugState.contains("videoDisabled=true/true")
+            )
+        }
+        assertTrue(
+            "the active MediaController must also report video disabled",
+            runOnMainSync(instrumentation) {
+                C.TRACK_TYPE_VIDEO in controller.trackSelectionParameters.disabledTrackTypes
+            }
         )
     }
 
@@ -501,6 +653,14 @@ class PlaybackTransitionInstrumentedTest {
             ?.substringAfter('=')
             ?.toIntOrNull()
             ?: error("standby player generation missing from debug state: $debugState")
+
+    private fun memoryRecycleCount(debugState: String): Int =
+        debugState.substringAfter("memory=", "")
+            .substringBefore(';')
+            .split('/')
+            .getOrNull(3)
+            ?.toIntOrNull()
+            ?: error("memory guard recycle count missing from debug state: $debugState")
 
     private fun currentMediaId(instrumentation: android.app.Instrumentation, controller: MediaController): String? =
         runOnMainSync(instrumentation) { controller.currentMediaItem?.mediaId }
