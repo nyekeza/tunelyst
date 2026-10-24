@@ -19,8 +19,9 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
     val standbyState = standby?.let {
         "${it.currentMediaItem?.mediaId}/${it.playbackState}/${it.playWhenReady}/${it.isPlaying}/${it.currentPosition}"
     } ?: "uninitialized"
-    return "event=$lastManualTransitionDebugEvent;pending=${pendingManualTransition != null};" +
-        "active=${activeManualTransition != null};crossfade=$crossfading/$crossfadeKind;" +
+    return "event=$lastManualTransitionDebugEvent;standbyGeneration=$standbyPlayerGeneration;" +
+        "pending=${pendingManualTransition != null};active=${activeManualTransition != null};" +
+        "crossfade=$crossfading/$crossfadeKind;" +
         "source=${source.currentMediaItem?.mediaId}/${source.currentMediaItemIndex}/" +
         "${source.playbackState}/${source.playWhenReady}/${source.isPlaying}/${source.currentPosition};" +
         "standby=$standbyState;fade=$manualFadeElapsedMs/$fadeDurationMs;" +
@@ -59,15 +60,44 @@ internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
 }
 
 internal fun MusicPlaybackService.ensureStandbyPlayerImpl(): ExoPlayer {
-    if (!isStandbyPlayerInitialized()) {
-        standbyPlayer = createPlayer(handleAudioFocus = false)
-        installListener(standbyPlayer)
-        if (isAudioSettingsInitialized()) {
-            standbyPlayer.setPlaybackParameters(PlaybackParameters(audioSettings.playbackSpeed, audioSettings.playbackPitch))
-            applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
-        }
-    }
+    if (!isStandbyPlayerInitialized()) standbyPlayer = createStandbyPlayerImpl()
     return standbyPlayer
+}
+
+internal fun MusicPlaybackService.createStandbyPlayerImpl(): ExoPlayer {
+    val player = createPlayer(handleAudioFocus = false)
+    installListener(player)
+    if (isAudioSettingsInitialized()) {
+        player.setPlaybackParameters(PlaybackParameters(audioSettings.playbackSpeed, audioSettings.playbackPitch))
+    }
+    standbyPlayerGeneration++
+    return player
+}
+
+/** Fully releases the inactive decoder after a transition instead of reusing native codec state. */
+internal fun MusicPlaybackService.recycleStandbyPlayerImpl() {
+    if (!isStandbyPlayerInitialized()) return
+    val oldPlayer = standbyPlayer
+    runCatching { oldPlayer.pause() }
+    runCatching { oldPlayer.stop() }
+    runCatching { oldPlayer.clearMediaItems() }
+
+    // Create the empty replacement before dropping the old instance, so a rare player-construction
+    // failure leaves a stopped, cleared player available for the next transition attempt.
+    val replacement = runCatching { createStandbyPlayerImpl() }
+        .onFailure { Log.w("TunelystPlayback", "Could not recreate the standby player after a transition", it) }
+        .getOrNull() ?: return
+    standbyPlayer = replacement
+
+    playerListeners.remove(oldPlayer)?.let { listener ->
+        runCatching { oldPlayer.removeListener(listener) }
+    }
+    releaseEqualizer(oldPlayer)
+    loudnessEnhancers.remove(oldPlayer)?.let { runCatching { it.release() } }
+    appliedReplayGainByPlayer.remove(oldPlayer)
+    audioSessionIds.remove(oldPlayer)
+    runCatching { oldPlayer.release() }
+        .onFailure { Log.w("TunelystPlayback", "Could not release the previous standby player", it) }
 }
 
 @OptIn(UnstableApi::class)

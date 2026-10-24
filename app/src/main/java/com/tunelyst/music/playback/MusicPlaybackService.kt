@@ -49,6 +49,7 @@ class MusicPlaybackService : MediaSessionService() {
     internal lateinit var audioPreferences: SharedPreferences
     internal lateinit var audioSettingsStore: AudioSettingsStore
     internal lateinit var audioManager: AudioManager
+    internal var standbyPlayerGeneration = 0
 
     internal fun isForegroundPlayerInitialized(): Boolean = ::foregroundPlayer.isInitialized
     internal fun isStandbyPlayerInitialized(): Boolean = ::standbyPlayer.isInitialized
@@ -355,6 +356,8 @@ class MusicPlaybackService : MediaSessionService() {
     internal fun recoverUnexpectedReadyPause() = this.recoverUnexpectedReadyPauseImpl()
 
     internal fun ensureStandbyPlayer(): ExoPlayer = this.ensureStandbyPlayerImpl()
+
+    internal fun recycleStandbyPlayer() = this.recycleStandbyPlayerImpl()
 
     @OptIn(UnstableApi::class)
     internal fun installListener(target: ExoPlayer) = this.installListenerImpl(target)

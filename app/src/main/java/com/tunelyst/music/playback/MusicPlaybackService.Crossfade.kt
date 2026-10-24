@@ -391,11 +391,7 @@ internal fun MusicPlaybackService.completeCrossfadeImpl() {
     fadeSourceIndex = C.INDEX_UNSET
     fadeStartPositionMs = 0L
     fadeDurationMs = 0L
-    standbyPlayer.pause()
-    standbyPlayer.stop()
-    standbyPlayer.clearMediaItems()
-    standbyPlayer.volume = 1f
-    standbyPlayer.setAudioAttributes(musicAudioAttributes, false)
+    recycleStandbyPlayer()
 }
 
 internal fun MusicPlaybackService.cancelCrossfadeImpl(
@@ -406,6 +402,11 @@ internal fun MusicPlaybackService.cancelCrossfadeImpl(
     val wasCrossfading = crossfading
     val hadManualTransition = crossfadeKind == CrossfadeKind.MANUAL ||
         pendingManualTransition != null || activeManualTransition != null
+    val shouldRecycleStandby = isStandbyPlayerInitialized() && (
+        crossfading || preparedNextIndex != C.INDEX_UNSET || pendingManualTransition != null ||
+            activeManualTransition != null || standbyPlayer.mediaItemCount > 0 ||
+            standbyPlayer.playbackState != Player.STATE_IDLE
+        )
     if (hadManualTransition) lastManualTransitionDebugEvent = "cancel:$debugReason"
     val volumeBeforeCancel = if (isForegroundPlayerInitialized()) foregroundPlayer.volume else 1f
     targetMediaId?.let { CrossfadeDisplayState.clearIncoming(it) }
@@ -431,10 +432,9 @@ internal fun MusicPlaybackService.cancelCrossfadeImpl(
     } else {
         clearCrossfadeCancelVolumeRestore()
     }
-    if (isStandbyPlayerInitialized()) {
-        standbyPlayer.pause()
-        standbyPlayer.stop()
-        standbyPlayer.clearMediaItems()
+    if (shouldRecycleStandby) {
+        recycleStandbyPlayer()
+    } else if (isStandbyPlayerInitialized()) {
         standbyPlayer.volume = 1f
     }
     preparedNextIndex = C.INDEX_UNSET
@@ -465,10 +465,9 @@ internal fun MusicPlaybackService.clearCrossfadeCancelVolumeRestoreImpl() {
 internal fun MusicPlaybackService.clearPreparedPlayerImpl() {
     if (crossfading) return
     if (isStandbyPlayerInitialized()) {
-        standbyPlayer.pause()
-        standbyPlayer.stop()
-        standbyPlayer.clearMediaItems()
-        standbyPlayer.volume = 1f
+        val hasPreparedResources = preparedNextIndex != C.INDEX_UNSET ||
+            standbyPlayer.mediaItemCount > 0 || standbyPlayer.playbackState != Player.STATE_IDLE
+        if (hasPreparedResources) recycleStandbyPlayer() else standbyPlayer.volume = 1f
     }
     preparedNextIndex = C.INDEX_UNSET
     targetMediaId = null

@@ -168,6 +168,94 @@ class PlaybackTransitionInstrumentedTest {
         }
     }
 
+    @OptIn(UnstableApi::class)
+    @Test
+    fun automaticCrossfadesKeepTheQueuePlayingAcrossRepeatedPlayerRecycling() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val settings = AudioSettingsStore(context)
+        val originalSettings = settings.read()
+        val wavFiles = listOf(
+            createWaveFile(context.cacheDir, "automatic-source", 261.63, durationSeconds = 3),
+            createWaveFile(context.cacheDir, "automatic-next", 329.63, durationSeconds = 3),
+            createWaveFile(context.cacheDir, "automatic-final", 392.00, durationSeconds = 3)
+        )
+        settings.setCrossfadeSeconds(1)
+        settings.setManualSkipFadeSeconds(0)
+        val controllerFuture = MediaController.Builder(
+            context,
+            androidx.media3.session.SessionToken(
+                context,
+                ComponentName(context, MusicPlaybackService::class.java)
+            )
+        ).buildAsync()
+        var controller: MediaController? = null
+
+        try {
+            val connectedController = controllerFuture.get(30, TimeUnit.SECONDS)
+            controller = connectedController
+            val activeController = connectedController
+            val initialStandbyGeneration = standbyGeneration(transitionDebugState(instrumentation, activeController))
+            runOnMainSync(instrumentation) {
+                activeController.stop()
+                activeController.repeatMode = Player.REPEAT_MODE_OFF
+                activeController.shuffleModeEnabled = false
+                activeController.setMediaItems(
+                    wavFiles.mapIndexed { index, file ->
+                        mediaItem("automatic-$index", file)
+                    },
+                    0,
+                    0L
+                )
+                activeController.prepare()
+                activeController.play()
+            }
+            awaitCondition(
+                instrumentation,
+                "automatic crossfade did not reach its second track",
+                diagnostics = {
+                    "mediaId=${currentMediaId(instrumentation, activeController)}, " +
+                        "position=${currentPosition(instrumentation, activeController)}, " +
+                        "service=${transitionDebugState(instrumentation, activeController)}"
+                }
+            ) {
+                currentMediaId(instrumentation, activeController) == "automatic-1" &&
+                    currentPosition(instrumentation, activeController) >= 300L
+            }
+            val afterFirstTransition = standbyGeneration(transitionDebugState(instrumentation, activeController))
+            assertTrue(
+                "the standby player should be recreated after the first crossfade",
+                afterFirstTransition > initialStandbyGeneration
+            )
+            awaitCondition(
+                instrumentation,
+                "automatic crossfade did not continue after recycling the standby player",
+                diagnostics = {
+                    "mediaId=${currentMediaId(instrumentation, activeController)}, " +
+                        "position=${currentPosition(instrumentation, activeController)}, " +
+                        "service=${transitionDebugState(instrumentation, activeController)}"
+                }
+            ) {
+                currentMediaId(instrumentation, activeController) == "automatic-2" &&
+                    currentPosition(instrumentation, activeController) >= 300L
+            }
+            val afterSecondTransition = standbyGeneration(transitionDebugState(instrumentation, activeController))
+            assertTrue(
+                "the standby player should be recreated after the second crossfade",
+                afterSecondTransition > afterFirstTransition
+            )
+            assertTrue("playback should continue on the final track", isPlaying(instrumentation, activeController))
+        } finally {
+            controller?.let { activeController ->
+                runOnMainSync(instrumentation) { activeController.stop() }
+            }
+            runOnMainSync(instrumentation) { MediaController.releaseFuture(controllerFuture) }
+            settings.setCrossfadeSeconds(originalSettings.crossfadeSeconds)
+            settings.setManualSkipFadeSeconds(originalSettings.manualSkipFadeSeconds)
+            wavFiles.forEach(File::delete)
+        }
+    }
+
     private fun sendTransitionRequest(
         controller: MediaController,
         request: PlaybackTransitionRequest
@@ -207,11 +295,14 @@ class PlaybackTransitionInstrumentedTest {
         .setUri(android.net.Uri.fromFile(file))
         .build()
 
-    private fun createWaveFile(directory: File, prefix: String, frequencyHz: Double): File {
+    private fun createWaveFile(
+        directory: File,
+        prefix: String,
+        frequencyHz: Double,
+        durationSeconds: Int = 30
+    ): File {
         val file = File.createTempFile(prefix, ".wav", directory)
         val sampleRate = 44_100
-        // Leave slow emulators enough time to expose the full queue before the source clip ends.
-        val durationSeconds = 30
         val sampleCount = sampleRate * durationSeconds
         val pcm = ByteBuffer.allocate(sampleCount * 2).order(ByteOrder.LITTLE_ENDIAN)
         repeat(sampleCount) { index ->
@@ -240,6 +331,13 @@ class PlaybackTransitionInstrumentedTest {
         }
         return file
     }
+
+    private fun standbyGeneration(debugState: String): Int =
+        debugState.split(';')
+            .firstOrNull { it.startsWith("standbyGeneration=") }
+            ?.substringAfter('=')
+            ?.toIntOrNull()
+            ?: error("standby player generation missing from debug state: $debugState")
 
     private fun currentMediaId(instrumentation: android.app.Instrumentation, controller: MediaController): String? =
         runOnMainSync(instrumentation) { controller.currentMediaItem?.mediaId }
