@@ -135,7 +135,8 @@ jobs:
           - api-level: 26
             emulator_target: default
           - api-level: 36
-            emulator_target: google_apis
+            # Tunelyst is fully on-device and does not require Google APIs.
+            emulator_target: default
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
