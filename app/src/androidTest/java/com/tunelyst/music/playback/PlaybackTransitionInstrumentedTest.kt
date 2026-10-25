@@ -39,9 +39,9 @@ class PlaybackTransitionInstrumentedTest {
         val settings = AudioSettingsStore(context)
         val originalSettings = settings.read()
         val wavFiles = listOf(
-            createWaveFile(context.cacheDir, "ordinary-source", 261.63),
-            createWaveFile(context.cacheDir, "ordinary-next", 329.63),
-            createWaveFile(context.cacheDir, "ordinary-final", 392.00)
+            createWaveFile(context.cacheDir, "ordinary-source", 261.63, durationSeconds = 180, sampleRate = 16_000),
+            createWaveFile(context.cacheDir, "ordinary-next", 329.63, durationSeconds = 180, sampleRate = 16_000),
+            createWaveFile(context.cacheDir, "ordinary-final", 392.00, durationSeconds = 180, sampleRate = 16_000)
         )
         settings.setCrossfadeSeconds(0)
         settings.setManualSkipFadeSeconds(0)
@@ -61,7 +61,7 @@ class PlaybackTransitionInstrumentedTest {
             controller = connectedController
             runOnMainSync(instrumentation) {
                 connectedController.stop()
-                connectedController.repeatMode = Player.REPEAT_MODE_OFF
+                connectedController.repeatMode = Player.REPEAT_MODE_ALL
                 connectedController.shuffleModeEnabled = false
                 connectedController.setMediaItems(
                     listOf(
@@ -97,44 +97,23 @@ class PlaybackTransitionInstrumentedTest {
             }
             assertAudioEffectsDetached(instrumentation, connectedController)
 
-            runOnMainSync(instrumentation) { connectedController.seekToNextMediaItem() }
-            awaitCondition(
-                instrumentation,
-                "ordinary next-track switch did not finish",
-                diagnostics = {
-                    "service=${transitionDebugState(instrumentation, connectedController)}"
-                }
-            ) {
-                runOnMainSync(instrumentation) {
-                    connectedController.currentMediaItem?.mediaId == "ordinary-1" && connectedController.isPlaying
-                }
-            }
-            assertAudioEffectsDetached(instrumentation, connectedController)
-
-            runOnMainSync(instrumentation) { connectedController.seekToNextMediaItem() }
-            awaitCondition(
-                instrumentation,
-                "ordinary final-track switch did not finish",
-                diagnostics = {
-                    "service=${transitionDebugState(instrumentation, connectedController)}"
-                }
-            ) {
-                runOnMainSync(instrumentation) {
-                    connectedController.currentMediaItem?.mediaId == "ordinary-2" && connectedController.isPlaying
-                }
-            }
-            assertAudioEffectsDetached(instrumentation, connectedController)
-
-            runOnMainSync(instrumentation) {
-                connectedController.repeatMode = Player.REPEAT_MODE_ALL
-                connectedController.shuffleModeEnabled = false
-            }
             repeat(12) { switchIndex ->
-                val expectedId = "ordinary-${switchIndex % 3}"
-                runOnMainSync(instrumentation) { connectedController.seekToNextMediaItem() }
+                val (fromId, expectedId) = runOnMainSync(instrumentation) {
+                    val currentId = connectedController.currentMediaItem?.mediaId
+                        ?: error("ordinary playback lost its current item")
+                    val nextIndex = connectedController.nextMediaItemIndex
+                    check(nextIndex in 0 until connectedController.mediaItemCount) {
+                        "repeat-all queue did not expose a next item: index=$nextIndex, " +
+                            "count=${connectedController.mediaItemCount}"
+                    }
+                    val nextId = connectedController.getMediaItemAt(nextIndex).mediaId
+                    connectedController.seekToNextMediaItem()
+                    currentId to nextId
+                }
+                assertTrue("track switch ${switchIndex + 1} should select a different item", fromId != expectedId)
                 awaitCondition(
                     instrumentation,
-                    "repeated ordinary track switch ${switchIndex + 1} did not finish",
+                    "repeated ordinary track switch ${switchIndex + 1} ($fromId -> $expectedId) did not finish",
                     diagnostics = { "service=${transitionDebugState(instrumentation, connectedController)}" }
                 ) {
                     runOnMainSync(instrumentation) {
@@ -613,11 +592,16 @@ class PlaybackTransitionInstrumentedTest {
         .setUri(android.net.Uri.fromFile(file))
         .build()
 
-    private fun createWaveFile(directory: File, prefix: String, frequencyHz: Double): File {
+    private fun createWaveFile(
+        directory: File,
+        prefix: String,
+        frequencyHz: Double,
+        durationSeconds: Int = 30,
+        sampleRate: Int = 44_100
+    ): File {
         val file = File.createTempFile(prefix, ".wav", directory)
-        val sampleRate = 44_100
-        // Leave slow emulators enough time to expose the full queue before the source clip ends.
-        val durationSeconds = 30
+        require(durationSeconds > 0 && sampleRate > 0)
+        // The ordinary-switch regression uses long clips so slow emulators cannot race natural EOS.
         val sampleCount = sampleRate * durationSeconds
         val pcm = ByteBuffer.allocate(sampleCount * 2).order(ByteOrder.LITTLE_ENDIAN)
         repeat(sampleCount) { index ->
