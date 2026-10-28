@@ -372,6 +372,7 @@ internal fun MusicPlaybackService.completeCrossfadeImpl() {
     outgoing.volume = 0f
     incoming.setAudioAttributes(musicAudioAttributes, true)
     foregroundPlayer = incoming
+    foregroundPlayerGeneration++
     standbyPlayer = outgoing
     mediaSession.setPlayer(createSessionPlayer(foregroundPlayer))
     crossfading = false

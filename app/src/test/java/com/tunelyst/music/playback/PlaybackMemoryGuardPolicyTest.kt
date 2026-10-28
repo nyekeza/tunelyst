@@ -18,19 +18,82 @@ class PlaybackMemoryGuardPolicyTest {
     }
 
     @Test
-    fun highSampleCountRequiresMeaningfulGrowthAndResetsBelowThreshold() {
+    fun firstRecoveryUsesAbsoluteThresholdEvenWithHighStartupBaseline() {
         val mib = 1024L * 1024L
         val threshold = 500L * mib
 
-        assertEquals(1, PlaybackMemoryGuardPolicy.nextHighSampleCount(0, 500L * mib, threshold, 0L))
-        assertEquals(2, PlaybackMemoryGuardPolicy.nextHighSampleCount(1, 750L * mib, threshold, 0L))
-        assertEquals(0, PlaybackMemoryGuardPolicy.nextHighSampleCount(2, 700L * mib, threshold, 550L * mib))
-        assertEquals(0, PlaybackMemoryGuardPolicy.nextHighSampleCount(2, 499L * mib, threshold, 0L))
-        assertEquals(0, PlaybackMemoryGuardPolicy.nextHighSampleCount(2, 600L * mib, 0L, 0L))
+        assertEquals(
+            1,
+            PlaybackMemoryGuardPolicy.nextHighSampleCount(
+                current = 0,
+                pressureBytes = threshold,
+                thresholdBytes = threshold,
+                recoveryBaselineBytes = 2_000L * mib,
+                hasRecoveredBefore = false
+            )
+        )
+        assertEquals(
+            2,
+            PlaybackMemoryGuardPolicy.nextHighSampleCount(
+                current = 1,
+                pressureBytes = 750L * mib,
+                thresholdBytes = threshold,
+                recoveryBaselineBytes = 2_000L * mib,
+                hasRecoveredBefore = false
+            )
+        )
+        assertEquals(
+            0,
+            PlaybackMemoryGuardPolicy.nextHighSampleCount(
+                current = 2,
+                pressureBytes = 499L * mib,
+                thresholdBytes = threshold,
+                recoveryBaselineBytes = 0L,
+                hasRecoveredBefore = false
+            )
+        )
+        assertEquals(
+            0,
+            PlaybackMemoryGuardPolicy.nextHighSampleCount(
+                current = 2,
+                pressureBytes = 600L * mib,
+                thresholdBytes = 0L,
+                recoveryBaselineBytes = 0L,
+                hasRecoveredBefore = false
+            )
+        )
     }
 
     @Test
-    fun recycleRequiresSustainedPressureAndHonorsCooldown() {
+    fun subsequentRecoveriesRequireRenewedGrowthAbovePostRecoveryBaseline() {
+        val mib = 1024L * 1024L
+        val threshold = 500L * mib
+        val recoveryBaseline = 600L * mib
+
+        assertEquals(
+            0,
+            PlaybackMemoryGuardPolicy.nextHighSampleCount(
+                current = 2,
+                pressureBytes = 700L * mib,
+                thresholdBytes = threshold,
+                recoveryBaselineBytes = recoveryBaseline,
+                hasRecoveredBefore = true
+            )
+        )
+        assertEquals(
+            1,
+            PlaybackMemoryGuardPolicy.nextHighSampleCount(
+                current = 0,
+                pressureBytes = 792L * mib,
+                thresholdBytes = threshold,
+                recoveryBaselineBytes = recoveryBaseline,
+                hasRecoveredBefore = true
+            )
+        )
+    }
+
+    @Test
+    fun recycleRequiresSustainedPressureAndHonorsAttemptCooldown() {
         assertFalse(PlaybackMemoryGuardPolicy.shouldRecycle(2, 30_000L, 0L))
         assertTrue(PlaybackMemoryGuardPolicy.shouldRecycle(3, 45_000L, 0L))
         assertFalse(PlaybackMemoryGuardPolicy.shouldRecycle(3, 100_000L, 45_000L))

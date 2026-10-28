@@ -6,7 +6,9 @@ import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionResult
@@ -142,7 +144,7 @@ class PlaybackTransitionInstrumentedTest {
 
     @OptIn(UnstableApi::class)
     @Test
-    fun memoryGuardPipelineRecyclePreservesQueuePositionAndPlaybackState() {
+    fun memoryGuardForegroundPlayerReplacementPreservesPlaybackState() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val settings = AudioSettingsStore(context)
@@ -164,6 +166,8 @@ class PlaybackTransitionInstrumentedTest {
             )
         ).buildAsync()
         var controller: MediaController? = null
+        val expectedPlaybackParameters = PlaybackParameters(1.25f, 0.9f)
+        val expectedTrackSelectionParameters = AtomicReference<TrackSelectionParameters?>()
 
         try {
             val connectedController = controllerFuture.get(30, TimeUnit.SECONDS)
@@ -173,6 +177,12 @@ class PlaybackTransitionInstrumentedTest {
                 connectedController.clearMediaItems()
                 connectedController.repeatMode = Player.REPEAT_MODE_ALL
                 connectedController.shuffleModeEnabled = true
+                val selectedTrackParameters = connectedController.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    .build()
+                connectedController.trackSelectionParameters = selectedTrackParameters
+                expectedTrackSelectionParameters.set(selectedTrackParameters)
+                connectedController.setPlaybackParameters(expectedPlaybackParameters)
                 connectedController.setMediaItems(
                     listOf(
                         mediaItem("memory-guard-0", wavFiles[0]),
@@ -202,7 +212,14 @@ class PlaybackTransitionInstrumentedTest {
                     isPlaying(instrumentation, connectedController)
             }
             val positionBeforeRecycle = currentPosition(instrumentation, connectedController)
-            val initialRecycleCount = memoryRecycleCount(transitionDebugState(instrumentation, connectedController))
+            val (currentIndexBeforeRecycle, queueIdsBeforeRecycle) = runOnMainSync(instrumentation) {
+                connectedController.currentMediaItemIndex to
+                    (0 until connectedController.mediaItemCount).map { connectedController.getMediaItemAt(it).mediaId }
+            }
+            val initialDebugState = transitionDebugState(instrumentation, connectedController)
+            val initialRecycleCount = memoryRecycleCount(initialDebugState)
+            val initialForegroundGeneration = foregroundPlayerGeneration(initialDebugState)
+            val initialForegroundPlayerIdentity = foregroundPlayerIdentity(initialDebugState)
             val recycleFuture = AtomicReference<ListenableFuture<SessionResult>>()
             runOnMainSync(instrumentation) {
                 recycleFuture.set(
@@ -218,22 +235,30 @@ class PlaybackTransitionInstrumentedTest {
             )
             awaitCondition(
                 instrumentation,
-                "memory-guard recycle did not restore active playback",
+                "memory-guard replacement did not restore the active session",
                 diagnostics = { "service=${transitionDebugState(instrumentation, connectedController)}" },
                 timeoutMs = 20_000L
             ) {
                 val state = transitionDebugState(instrumentation, connectedController)
                 runOnMainSync(instrumentation) {
                     connectedController.currentMediaItem?.mediaId == "memory-guard-0" &&
-                        connectedController.isPlaying && connectedController.mediaItemCount == 3 &&
+                        connectedController.currentMediaItemIndex == currentIndexBeforeRecycle &&
+                        connectedController.isPlaying && connectedController.mediaItemCount == queueIdsBeforeRecycle.size &&
+                        (0 until connectedController.mediaItemCount).map { connectedController.getMediaItemAt(it).mediaId } ==
+                            queueIdsBeforeRecycle &&
                         connectedController.repeatMode == Player.REPEAT_MODE_ALL &&
-                        connectedController.shuffleModeEnabled
-                } && memoryRecycleCount(state) > initialRecycleCount
+                        connectedController.shuffleModeEnabled &&
+                        connectedController.playbackParameters == expectedPlaybackParameters &&
+                        connectedController.trackSelectionParameters == expectedTrackSelectionParameters.get()
+                } && memoryRecycleCount(state) > initialRecycleCount &&
+                    foregroundPlayerGeneration(state) > initialForegroundGeneration &&
+                    foregroundPlayerIdentity(state) != initialForegroundPlayerIdentity
             }
 
             val positionAfterRecycle = currentPosition(instrumentation, connectedController)
             assertTrue(
-                "pipeline recycle should resume near the saved position ($positionBeforeRecycle -> $positionAfterRecycle)",
+                "foreground player replacement should resume near the saved position " +
+                    "($positionBeforeRecycle -> $positionAfterRecycle)",
                 positionAfterRecycle >= positionBeforeRecycle - 1_000L
             )
             assertAudioEffectsDetached(instrumentation, connectedController)
@@ -637,6 +662,20 @@ class PlaybackTransitionInstrumentedTest {
             ?.substringAfter('=')
             ?.toIntOrNull()
             ?: error("standby player generation missing from debug state: $debugState")
+
+    private fun foregroundPlayerGeneration(debugState: String): Int =
+        debugState.split(';')
+            .firstOrNull { it.startsWith("foregroundGeneration=") }
+            ?.substringAfter('=')
+            ?.toIntOrNull()
+            ?: error("foreground player generation missing from debug state: $debugState")
+
+    private fun foregroundPlayerIdentity(debugState: String): Int =
+        debugState.split(';')
+            .firstOrNull { it.startsWith("foregroundPlayerIdentity=") }
+            ?.substringAfter('=')
+            ?.toIntOrNull()
+            ?: error("foreground player identity missing from debug state: $debugState")
 
     private fun memoryRecycleCount(debugState: String): Int =
         debugState.substringAfter("memory=", "")

@@ -50,12 +50,17 @@ class MusicPlaybackService : MediaSessionService() {
     internal lateinit var audioSettingsStore: AudioSettingsStore
     internal lateinit var audioManager: AudioManager
     internal var standbyPlayerGeneration = 0
+    internal var foregroundPlayerGeneration = 0
     internal var memoryGuardThresholdBytes = 0L
-    internal var memoryGuardBaselineNativePssBytes = 0L
+    internal var memoryGuardRecoveryBaselinePressureBytes = 0L
     internal var memoryGuardHighSamples = 0
     internal var memoryGuardLastSampleElapsedMs = 0L
-    internal var memoryGuardLastRecycleElapsedMs = 0L
+    internal var memoryGuardLastRecoveryAttemptElapsedMs = 0L
     internal var memoryGuardLastNativePssBytes = 0L
+    internal var memoryGuardLastTotalPssBytes = 0L
+    internal var memoryGuardLastNativeAllocatedBytes = 0L
+    internal var memoryGuardLastPressureBytes = 0L
+    internal var memoryGuardRecoveryAttemptCount = 0
     internal var memoryGuardRecycleCount = 0
 
     internal fun isForegroundPlayerInitialized(): Boolean = ::foregroundPlayer.isInitialized
@@ -229,6 +234,7 @@ class MusicPlaybackService : MediaSessionService() {
         audioPreferences.registerOnSharedPreferenceChangeListener(settingsListener)
 
         foregroundPlayer = createPlayer(handleAudioFocus = true)
+        foregroundPlayerGeneration = 1
         installListener(foregroundPlayer)
         applyPlaybackParameters()
         applyLoudnessSettings()

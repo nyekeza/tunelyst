@@ -28,9 +28,11 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
     val standbyVideoDisabled = standby?.let {
         C.TRACK_TYPE_VIDEO in it.trackSelectionParameters.disabledTrackTypes
     } ?: false
-    val memoryGuardState = "$memoryGuardLastNativePssBytes/$memoryGuardThresholdBytes/" +
-        "$memoryGuardHighSamples/$memoryGuardRecycleCount"
+    val memoryGuardState = "$memoryGuardLastPressureBytes/$memoryGuardThresholdBytes/" +
+        "$memoryGuardHighSamples/$memoryGuardRecycleCount/$memoryGuardRecoveryAttemptCount"
     return "event=$lastManualTransitionDebugEvent;standbyGeneration=$standbyPlayerGeneration;" +
+        "foregroundGeneration=$foregroundPlayerGeneration;" +
+        "foregroundPlayerIdentity=${System.identityHashCode(source)};" +
         "pending=${pendingManualTransition != null};active=${activeManualTransition != null};" +
         "crossfade=$crossfading/$crossfadeKind;" +
         "source=${source.currentMediaItem?.mediaId}/${source.currentMediaItemIndex}/" +
@@ -41,7 +43,12 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
         "effects=eq${equalizers.size}/le${loudnessEnhancers.size};" +
         "sourceEffects=$sourceEffects;standbyEffects=$standbyEffects;" +
         "videoDisabled=$sourceVideoDisabled/$standbyVideoDisabled;memory=$memoryGuardState;" +
-        "memoryBaselinePss=$memoryGuardBaselineNativePssBytes"
+        "memoryNativePss=$memoryGuardLastNativePssBytes;" +
+        "memoryTotalPss=$memoryGuardLastTotalPssBytes;" +
+        "memoryNativeAllocated=$memoryGuardLastNativeAllocatedBytes;" +
+        "memoryPressure=$memoryGuardLastPressureBytes;" +
+        "memoryRecoveryBaseline=$memoryGuardRecoveryBaselinePressureBytes;" +
+        "memoryLastAttemptElapsed=$memoryGuardLastRecoveryAttemptElapsedMs"
 }
 
 internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
@@ -104,14 +111,20 @@ internal fun MusicPlaybackService.recycleStandbyPlayerImpl() {
         .getOrNull() ?: return
     standbyPlayer = replacement
 
-    playerListeners.remove(oldPlayer)?.let { listener ->
-        runCatching { oldPlayer.removeListener(listener) }
+    releaseDetachedPlayerImpl(oldPlayer, "standby recycle")
+}
+
+/** Releases all service-owned listener and audio-effect state for a player that is no longer active. */
+internal fun MusicPlaybackService.releaseDetachedPlayerImpl(target: ExoPlayer, reason: String) {
+    playerListeners.remove(target)?.let { listener ->
+        runCatching { target.removeListener(listener) }
     }
-    releaseEqualizer(oldPlayer)
-    releaseLoudnessEnhancer(oldPlayer)
-    audioSessionIds.remove(oldPlayer)
-    runCatching { oldPlayer.release() }
-        .onFailure { Log.w("TunelystPlayback", "Could not release the previous standby player", it) }
+    releaseEqualizer(target)
+    releaseLoudnessEnhancer(target)
+    audioSessionIds.remove(target)
+    appliedReplayGainByPlayer.remove(target)
+    runCatching { target.release() }
+        .onFailure { Log.w("TunelystPlayback", "Could not release a detached player ($reason)", it) }
 }
 
 @OptIn(UnstableApi::class)
