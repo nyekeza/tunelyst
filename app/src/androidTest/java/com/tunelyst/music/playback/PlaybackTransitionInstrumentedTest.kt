@@ -207,9 +207,27 @@ class PlaybackTransitionInstrumentedTest {
             }
             assertAudioEffectsDetached(instrumentation, connectedController)
             runOnMainSync(instrumentation) { connectedController.seekTo(5_000L) }
-            awaitCondition(instrumentation, "memory-guard test seek did not finish") {
-                currentPosition(instrumentation, connectedController) >= 5_000L &&
-                    isPlaying(instrumentation, connectedController)
+            awaitCondition(
+                instrumentation,
+                "memory-guard test seek did not finish",
+                diagnostics = {
+                    val controllerState = runOnMainSync(instrumentation) {
+                        "mediaId=${connectedController.currentMediaItem?.mediaId}, " +
+                            "index=${connectedController.currentMediaItemIndex}, " +
+                            "position=${connectedController.currentPosition}, " +
+                            "duration=${connectedController.duration}, " +
+                            "playWhenReady=${connectedController.playWhenReady}, " +
+                            "isPlaying=${connectedController.isPlaying}, " +
+                            "playbackState=${connectedController.playbackState}, " +
+                            "suppression=${connectedController.playbackSuppressionReason}"
+                    }
+                    "$controllerState, service=${transitionDebugState(instrumentation, connectedController)}"
+                },
+                timeoutMs = 30_000L
+            ) {
+                runOnMainSync(instrumentation) {
+                    connectedController.currentPosition >= 5_000L && connectedController.isPlaying
+                }
             }
             val positionBeforeRecycle = currentPosition(instrumentation, connectedController)
             val (currentIndexBeforeRecycle, queueIdsBeforeRecycle) = runOnMainSync(instrumentation) {
@@ -382,11 +400,27 @@ class PlaybackTransitionInstrumentedTest {
             ) {
                 currentMediaId(instrumentation, activeController) == "transition-next"
             }
-            val incomingPosition = currentPosition(instrumentation, activeController)
-            assertTrue(
-                "incoming track position should show that it played during the crossfade (position=$incomingPosition)",
-                incomingPosition >= 500L
-            )
+            awaitCondition(
+                instrumentation,
+                "incoming track did not remain playing after manual crossfade",
+                diagnostics = {
+                    val controllerState = runOnMainSync(instrumentation) {
+                        "mediaId=${activeController.currentMediaItem?.mediaId}, " +
+                            "position=${activeController.currentPosition}, " +
+                            "playWhenReady=${activeController.playWhenReady}, " +
+                            "isPlaying=${activeController.isPlaying}, " +
+                            "playbackState=${activeController.playbackState}, " +
+                            "suppression=${activeController.playbackSuppressionReason}"
+                    }
+                    "$controllerState, service=${transitionDebugState(instrumentation, activeController)}"
+                },
+                timeoutMs = 15_000L
+            ) {
+                runOnMainSync(instrumentation) {
+                    activeController.currentMediaItem?.mediaId == "transition-next" &&
+                        activeController.currentPosition >= 500L && activeController.isPlaying
+                }
+            }
             val afterManualNextGeneration = standbyGeneration(transitionDebugState(instrumentation, activeController))
             assertTrue(
                 "the standby player should be recreated after manual crossfade",
@@ -412,16 +446,33 @@ class PlaybackTransitionInstrumentedTest {
             }
             val commandResult = commandFuture.get().get(15, TimeUnit.SECONDS)
             assertEquals(SessionResult.RESULT_SUCCESS, commandResult.resultCode)
-            awaitCondition(instrumentation, "queue replacement did not finish") {
-                currentMediaId(instrumentation, activeController) == "transition-selected"
+            awaitCondition(
+                instrumentation,
+                "queue replacement did not finish in active playback",
+                diagnostics = {
+                    val controllerState = runOnMainSync(instrumentation) {
+                        "mediaId=${activeController.currentMediaItem?.mediaId}, " +
+                            "position=${activeController.currentPosition}, " +
+                            "playWhenReady=${activeController.playWhenReady}, " +
+                            "isPlaying=${activeController.isPlaying}, " +
+                            "playbackState=${activeController.playbackState}, " +
+                            "suppression=${activeController.playbackSuppressionReason}"
+                    }
+                    "$controllerState, service=${transitionDebugState(instrumentation, activeController)}"
+                },
+                timeoutMs = 30_000L
+            ) {
+                runOnMainSync(instrumentation) {
+                    activeController.currentMediaItem?.mediaId == "transition-selected" &&
+                        activeController.currentPosition >= 500L && activeController.isPlaying
+                }
             }
+            val afterReplacementDebugState = transitionDebugState(instrumentation, activeController)
+            val afterReplacementGeneration = standbyGeneration(afterReplacementDebugState)
             assertTrue(
-                "replacement track position should show that it played during the crossfade",
-                currentPosition(instrumentation, activeController) >= 500L
-            )
-            val afterReplacementGeneration = standbyGeneration(transitionDebugState(instrumentation, activeController))
-            assertTrue(
-                "the standby player should be recreated after queue-replacement crossfade",
+                "the standby player should be recreated after queue-replacement crossfade " +
+                    "(generation=$afterManualNextGeneration -> $afterReplacementGeneration; " +
+                    "service=$afterReplacementDebugState)",
                 afterReplacementGeneration > afterManualNextGeneration
             )
             assertAudioEffectsDetached(instrumentation, activeController)
