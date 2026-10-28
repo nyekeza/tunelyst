@@ -6,11 +6,12 @@ import android.content.Context
 import android.os.Debug
 import android.os.SystemClock
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.common.ShuffleOrder
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ShuffleOrder
 
 private data class PlaybackMemorySample(
     val nativePssBytes: Long,
