@@ -173,8 +173,7 @@ jobs:
           disable-animations: true
           emulator-options: '-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim'
           script: >-
-            bash -o pipefail -c 'bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace 2>&1 |
-            tee "$RUNNER_TEMP/connectedDebugAndroidTest.log"'
+            bash -o pipefail -c 'if [[ "${{ matrix.api-level }}" == "36" ]]; then bash .github/scripts/wait-for-android-device.sh 36; fi; bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace 2>&1 | tee "$RUNNER_TEMP/connectedDebugAndroidTest.log"'
       - name: Report instrumented test failures
         if: always()
         shell: bash
