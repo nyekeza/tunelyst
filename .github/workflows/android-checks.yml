@@ -173,7 +173,7 @@ jobs:
           disable-animations: true
           emulator-options: '-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim'
           script: >-
-            bash -e -o pipefail -c 'if [[ "${{ matrix.api-level }}" == "36" ]]; then bash .github/scripts/wait-for-android-device.sh 36; fi; bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace 2>&1 | tee "$RUNNER_TEMP/connectedDebugAndroidTest.log"'
+            bash -e -o pipefail -c 'if [[ "${{ matrix.api-level }}" == "36" ]]; then bash .github/scripts/wait-for-android-device.sh 36; bash .github/scripts/run-api36-instrumented-classes.sh; else bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace 2>&1 | tee "$RUNNER_TEMP/connectedDebugAndroidTest.log"; fi'
       - name: Report instrumented test failures
         if: always()
         shell: bash
@@ -206,7 +206,7 @@ jobs:
           PY
 
       - name: Capture emulator diagnostics
-        if: failure()
+        if: failure() || cancelled()
         shell: bash
         run: |
           set +e
