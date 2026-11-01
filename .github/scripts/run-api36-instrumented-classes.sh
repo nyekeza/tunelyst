@@ -22,6 +22,9 @@ for index in "${!test_selectors[@]}"; do
   printf '\n=== Android 36 test selector %s/%s: %s ===\n' \
     "$display_index" "${#test_selectors[@]}" "$selector" | tee -a "$log_file"
 
+  printf 'Rechecking emulator readiness immediately before this test.\n' | tee -a "$log_file"
+  bash .github/scripts/wait-for-android-device.sh 36 36 5 2>&1 | tee -a "$log_file"
+
   if timeout --signal=TERM --kill-after=30s 10m \
     bash ./gradlew --no-daemon connectedDebugAndroidTest --stacktrace \
       "-Pandroid.testInstrumentationRunnerArguments.class=$selector" 2>&1 | tee -a "$log_file"; then
