@@ -676,16 +676,27 @@ class PlaybackTransitionInstrumentedTest {
         sampleRate: Int = 44_100
     ): File {
         val file = File.createTempFile(prefix, ".wav", directory)
-        require(durationSeconds > 0 && sampleRate > 0)
-        // The ordinary-switch regression uses long clips so slow emulators cannot race natural EOS.
+        require(durationSeconds > 0 && sampleRate > 0 && frequencyHz > 0.0)
+        // Keep long clips so slow emulators cannot race natural EOS, but calculate only one
+        // sine-wave period. Repeating its PCM bytes avoids millions of expensive trig calls.
         val sampleCount = sampleRate * durationSeconds
-        val pcm = ByteBuffer.allocate(sampleCount * 2).order(ByteOrder.LITTLE_ENDIAN)
-        repeat(sampleCount) { index ->
-            val phase = 2.0 * PI * frequencyHz * index / sampleRate
+        val periodSampleCount = (sampleRate / frequencyHz).roundToInt().coerceAtLeast(1)
+        val period = ByteBuffer.allocate(periodSampleCount * 2).order(ByteOrder.LITTLE_ENDIAN)
+        repeat(periodSampleCount) { index ->
+            val phase = 2.0 * PI * index / periodSampleCount
             val sample = (sin(phase) * Short.MAX_VALUE * 0.15).roundToInt().toShort()
-            pcm.putShort(sample)
+            period.putShort(sample)
         }
-        val pcmBytes = pcm.array()
+        val periodBytes = period.array()
+        val pcmBytes = ByteArray(sampleCount * 2)
+        val firstCopyLength = minOf(periodBytes.size, pcmBytes.size)
+        System.arraycopy(periodBytes, 0, pcmBytes, 0, firstCopyLength)
+        var bytesFilled = firstCopyLength
+        while (bytesFilled < pcmBytes.size) {
+            val copyLength = minOf(bytesFilled, pcmBytes.size - bytesFilled)
+            System.arraycopy(pcmBytes, 0, pcmBytes, bytesFilled, copyLength)
+            bytesFilled += copyLength
+        }
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
         header.put("RIFF".toByteArray(StandardCharsets.US_ASCII))
         header.putInt(36 + pcmBytes.size)
