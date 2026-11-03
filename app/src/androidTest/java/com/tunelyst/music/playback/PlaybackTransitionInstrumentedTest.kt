@@ -33,6 +33,20 @@ import kotlin.math.sin
 
 @RunWith(AndroidJUnit4::class)
 class PlaybackTransitionInstrumentedTest {
+    @Test
+    fun replayGainRuntimeCacheEvictsOldEntries() {
+        val prefix = "cache-test-${SystemClock.elapsedRealtime()}-"
+        repeat(ReplayGainRuntimeCache.MAX_CACHED_GAINS + 1) { index ->
+            ReplayGainRuntimeCache.put("$prefix$index", index.toFloat())
+        }
+
+        assertEquals(null, ReplayGainRuntimeCache.get("${prefix}0"))
+        assertEquals(
+            ReplayGainRuntimeCache.MAX_CACHED_GAINS.toFloat(),
+            ReplayGainRuntimeCache.get("$prefix${ReplayGainRuntimeCache.MAX_CACHED_GAINS}")
+        )
+    }
+
     @OptIn(UnstableApi::class)
     @Test
     fun ordinaryTrackSwitchesDoNotAttachDisabledAudioEffects() {
@@ -98,6 +112,16 @@ class PlaybackTransitionInstrumentedTest {
                 hasActiveAudioSession(transitionDebugState(instrumentation, connectedController))
             }
             assertAudioEffectsDetached(instrumentation, connectedController)
+
+            val inQueueRequestShape = runOnMainSync(instrumentation) {
+                val request = inQueueTransitionRequest(
+                    connectedController,
+                    connectedController.nextMediaItemIndex
+                ) ?: error("ordinary playback did not produce an in-queue transition request")
+                request.mediaItems.size to request.sourceQueueFingerprint
+            }
+            assertEquals("ordinary skips should not snapshot the full queue", 0, inQueueRequestShape.first)
+            assertTrue("in-queue requests should carry a compact queue identity", inQueueRequestShape.second != null)
 
             repeat(12) { switchIndex ->
                 val (fromId, expectedId) = runOnMainSync(instrumentation) {

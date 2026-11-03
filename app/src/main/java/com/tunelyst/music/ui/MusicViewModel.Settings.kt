@@ -10,9 +10,12 @@ import com.tunelyst.music.data.RepeatAvoidanceLevel
 import com.tunelyst.music.data.Song
 import com.tunelyst.music.playback.ReplayGainRuntimeCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 internal fun MusicViewModel.setEqualizerEnabledImpl(enabled: Boolean) {
@@ -85,10 +88,13 @@ internal fun MusicViewModel.setPlaybackPitchImpl(pitch: Float) {
 
 internal fun MusicViewModel.setNormalizeVolumeImpl(enabled: Boolean) {
     _audioSettings.value = audioSettingsStore.setNormalizeVolume(enabled)
-    if (enabled) scheduleEmbeddedReplayGainForCurrentQueue()
+    scheduleEmbeddedReplayGainForCurrentQueue()
 }
 
 internal fun MusicViewModel.scheduleEmbeddedReplayGainForCurrentQueueImpl() {
+    // Cancel first so every early return (including normalization being disabled) stops stale work.
+    replayGainEnrichmentJob?.cancel()
+    replayGainEnrichmentJob = null
     if (!_audioSettings.value.normalizeVolume) return
     val activePlayer = player ?: return
     val currentIndex = activePlayer.currentMediaItemIndex
@@ -100,12 +106,17 @@ internal fun MusicViewModel.scheduleEmbeddedReplayGainForCurrentQueueImpl() {
     val queueSongs = mediaIds.mapNotNull { id -> id.toLongOrNull()?.let(songLookup::get) }
     if (queueSongs.size != mediaIds.size) return
     if (queueSongs.none { it.replayGainDb == null && !repository.hasResolvedEmbeddedReplayGain(it.uri) }) return
-    replayGainEnrichmentJob?.cancel()
     replayGainEnrichmentJob = viewModelScope.launch {
         val enriched = withContext(Dispatchers.IO) {
-            queueSongs.map { song ->
-                if (song.replayGainDb != null) song
-                else repository.embeddedReplayGainDb(song.uri)?.let { gain -> song.copy(replayGainDb = gain) } ?: song
+            replayGainEnrichmentMutex.withLock {
+                val coroutineContext = currentCoroutineContext()
+                queueSongs.map { song ->
+                    // The tag reader is blocking; stop a cancelled lookahead between files and
+                    // keep only one scan in flight while a read already underway finishes.
+                    coroutineContext.ensureActive()
+                    if (song.replayGainDb != null) song
+                    else repository.embeddedReplayGainDb(song.uri)?.let { gain -> song.copy(replayGainDb = gain) } ?: song
+                }
             }
         }
         withContext(Dispatchers.Main) {

@@ -1,6 +1,6 @@
 package com.tunelyst.music.playback
 
-/** Pure policy for bounded native-heap PSS monitoring while the background playback service is active. */
+/** Pure policy for bounded process-PSS monitoring while the background playback service is active. */
 internal object PlaybackMemoryGuardPolicy {
     const val SAMPLE_INTERVAL_MS = 15_000L
     const val REQUIRED_HIGH_SAMPLES = 3
@@ -20,6 +20,15 @@ internal object PlaybackMemoryGuardPolicy {
             .toLong()
             .coerceIn(MIN_THRESHOLD_BYTES, MAX_THRESHOLD_BYTES)
     }
+
+    /** Prefer total process PSS so Java/graphics growth is visible; retain native fallbacks for OEMs. */
+    fun pressureBytes(
+        totalPssBytes: Long,
+        nativePssBytes: Long,
+        nativeHeapAllocatedBytes: Long
+    ): Long = totalPssBytes.takeIf { it > 0L }
+        ?: nativePssBytes.takeIf { it > 0L }
+        ?: nativeHeapAllocatedBytes.coerceAtLeast(0L)
 
     /**
      * The first recovery is based on the absolute limit, so a high startup baseline cannot mask

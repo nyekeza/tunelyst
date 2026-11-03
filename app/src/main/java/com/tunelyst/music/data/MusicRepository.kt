@@ -8,16 +8,18 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.LruCache
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 import com.tunelyst.music.core.logic.cleanTrackDisplayName
 
 /** Reads the indexed library and resolves audio explicitly shared through Android providers. */
 class MusicRepository(context: Context) {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
-    private val replayGainCache = ConcurrentHashMap<String, Float>()
-    private val replayGainMisses = ConcurrentHashMap.newKeySet<String>()
+    /** Bounded positive and negative cache for optional ReplayGain tag scans. */
+    private val replayGainCache = LruCache<String, Float>(MAX_REPLAY_GAIN_CACHE_ENTRIES)
+    /** Background tag reads are serialized; cache lookups themselves never wait on file I/O. */
+    private val replayGainReadLock = Any()
 
     /** Resolve a shared audio URI from MediaStore and embedded tags, including the file's own cover art. */
     fun songFromUri(uri: Uri): Song? {
@@ -240,18 +242,21 @@ class MusicRepository(context: Context) {
 
     /** Reads a small tag window on demand (only when the user enables loudness normalization). */
     fun embeddedReplayGainDb(uri: Uri): Float? {
-        val key = uri.toString()
-        replayGainCache[key]?.let { return it }
-        if (replayGainMisses.contains(key)) return null
-        val value = EmbeddedReplayGainReader.read(appContext, uri)
-        if (value != null) replayGainCache[key] = value else replayGainMisses += key
-        return value
+        val cached = replayGainCache.get(uri.toString()) ?: return readAndCacheReplayGain(uri)
+        return cached.takeIf(Float::isFinite)
     }
 
-    fun hasResolvedEmbeddedReplayGain(uri: Uri): Boolean {
+    private fun readAndCacheReplayGain(uri: Uri): Float? = synchronized(replayGainReadLock) {
         val key = uri.toString()
-        return replayGainCache.containsKey(key) || replayGainMisses.contains(key)
+        // A second cache check avoids duplicate reads if another caller resolved this URI meanwhile.
+        replayGainCache.get(key)?.let { return@synchronized it.takeIf(Float::isFinite) }
+        val value = EmbeddedReplayGainReader.read(appContext, uri)
+        replayGainCache.put(key, value ?: REPLAY_GAIN_CACHE_MISS)
+        value
     }
+
+    fun hasResolvedEmbeddedReplayGain(uri: Uri): Boolean =
+        replayGainCache.get(uri.toString()) != null
 
     private fun standardProjection(includeOptionalColumns: Boolean): Array<String> {
         val base = mutableListOf(
@@ -376,6 +381,8 @@ class MusicRepository(context: Context) {
     private fun normalizeFolder(path: String): String = path.trim().replace('\\', '/').trim('/').ifBlank { "" }
 
     private companion object {
+        const val MAX_REPLAY_GAIN_CACHE_ENTRIES = 512
+        val REPLAY_GAIN_CACHE_MISS = Float.NaN
         const val MAX_SHARED_ARTWORK_BYTES = 20 * 1024 * 1024
         const val COLUMN_ALBUM_ARTIST = "album_artist"
         const val COLUMN_DISC_NUMBER = "disc_number"

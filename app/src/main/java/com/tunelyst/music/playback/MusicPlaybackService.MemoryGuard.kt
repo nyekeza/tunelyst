@@ -18,9 +18,13 @@ private data class PlaybackMemorySample(
     val totalPssBytes: Long,
     val nativeHeapAllocatedBytes: Long
 ) {
-    /** PSS is the guard's primary signal; allocated bytes keep a useful fallback on OEM builds. */
+    /** Total process PSS sees managed, native, and graphics-attributed growth. */
     val pressureBytes: Long
-        get() = nativePssBytes.takeIf { it > 0L } ?: nativeHeapAllocatedBytes
+        get() = PlaybackMemoryGuardPolicy.pressureBytes(
+            totalPssBytes = totalPssBytes,
+            nativePssBytes = nativePssBytes,
+            nativeHeapAllocatedBytes = nativeHeapAllocatedBytes
+        )
 }
 
 internal fun MusicPlaybackService.initializePlaybackMemoryGuardImpl() {
@@ -82,7 +86,7 @@ internal fun MusicPlaybackService.updatePlaybackMemoryGuardImpl() {
     memoryGuardHighSamples = 0
     memoryGuardLastRecoveryAttemptElapsedMs = now
     memoryGuardRecoveryAttemptCount++
-    if (replaceForegroundPlayerForMemoryPressureImpl("sustained-native-pss", sample)) {
+    if (replaceForegroundPlayerForMemoryPressureImpl("sustained-process-pss", sample)) {
         memoryGuardRecycleCount++
     }
 }
