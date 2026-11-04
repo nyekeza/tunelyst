@@ -324,7 +324,7 @@ class PlaybackTransitionInstrumentedTest {
 
     @OptIn(UnstableApi::class)
     @Test
-    fun manualAndAutomaticCrossfadesRecycleTheStandbyPlayerAcrossQueueTransitions() {
+    fun manualAndAutomaticCrossfadesReuseTheStandbyPlayerAcrossQueueTransitions() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val settings = AudioSettingsStore(context)
@@ -447,7 +447,7 @@ class PlaybackTransitionInstrumentedTest {
             }
             val afterManualNextGeneration = standbyGeneration(transitionDebugState(instrumentation, activeController))
             assertTrue(
-                "the standby player should be recreated after manual crossfade",
+                "the standby player should be initialized for the first manual crossfade",
                 afterManualNextGeneration > initialStandbyGeneration
             )
             assertAudioEffectsDetached(instrumentation, activeController)
@@ -493,11 +493,12 @@ class PlaybackTransitionInstrumentedTest {
             }
             val afterReplacementDebugState = transitionDebugState(instrumentation, activeController)
             val afterReplacementGeneration = standbyGeneration(afterReplacementDebugState)
-            assertTrue(
-                "the standby player should be recreated after queue-replacement crossfade " +
+            assertEquals(
+                "the standby player slot should be reused after queue-replacement crossfade " +
                     "(generation=$afterManualNextGeneration -> $afterReplacementGeneration; " +
                     "service=$afterReplacementDebugState)",
-                afterReplacementGeneration > afterManualNextGeneration
+                afterManualNextGeneration,
+                afterReplacementGeneration
             )
             assertAudioEffectsDetached(instrumentation, activeController)
 
@@ -550,7 +551,7 @@ class PlaybackTransitionInstrumentedTest {
             }
             awaitCondition(
                 instrumentation,
-                "first automatic crossfade did not recycle the standby player",
+                "first automatic crossfade did not reuse the standby player slot",
                 diagnostics = {
                     "mediaId=${currentMediaId(instrumentation, activeController)}, " +
                         "position=${currentPosition(instrumentation, activeController)}, " +
@@ -561,14 +562,15 @@ class PlaybackTransitionInstrumentedTest {
                 val state = transitionDebugState(instrumentation, activeController)
                 currentMediaId(instrumentation, activeController) == "automatic-1" &&
                     currentPosition(instrumentation, activeController) >= 500L &&
-                    standbyGeneration(state) > initialAutomaticGeneration
+                    standbyGeneration(state) == initialAutomaticGeneration
             }
             val afterFirstAutomaticGeneration = standbyGeneration(
                 transitionDebugState(instrumentation, activeController)
             )
-            assertTrue(
-                "the standby player should be recreated after the first automatic crossfade",
-                afterFirstAutomaticGeneration > initialAutomaticGeneration
+            assertEquals(
+                "the standby player slot should remain reused after the first automatic crossfade",
+                initialAutomaticGeneration,
+                afterFirstAutomaticGeneration
             )
             assertAudioEffectsDetached(instrumentation, activeController)
 
@@ -577,7 +579,7 @@ class PlaybackTransitionInstrumentedTest {
             }
             awaitCondition(
                 instrumentation,
-                "second automatic crossfade did not recycle the standby player",
+                "second automatic crossfade did not reuse the standby player slot",
                 diagnostics = {
                     "mediaId=${currentMediaId(instrumentation, activeController)}, " +
                         "position=${currentPosition(instrumentation, activeController)}, " +
@@ -588,14 +590,15 @@ class PlaybackTransitionInstrumentedTest {
                 val state = transitionDebugState(instrumentation, activeController)
                 currentMediaId(instrumentation, activeController) == "automatic-2" &&
                     currentPosition(instrumentation, activeController) >= 500L &&
-                    standbyGeneration(state) > afterFirstAutomaticGeneration
+                    standbyGeneration(state) == afterFirstAutomaticGeneration
             }
             val afterSecondAutomaticGeneration = standbyGeneration(
                 transitionDebugState(instrumentation, activeController)
             )
-            assertTrue(
-                "the standby player should be recreated after the second automatic crossfade",
-                afterSecondAutomaticGeneration > afterFirstAutomaticGeneration
+            assertEquals(
+                "the standby player slot should remain reused after the second automatic crossfade",
+                afterFirstAutomaticGeneration,
+                afterSecondAutomaticGeneration
             )
             assertAudioEffectsDetached(instrumentation, activeController)
             assertTrue("playback should continue on the final track", isPlaying(instrumentation, activeController))
