@@ -96,22 +96,42 @@ internal fun MusicPlaybackService.createStandbyPlayerImpl(): ExoPlayer {
     return player
 }
 
-/** Fully releases the inactive decoder after a transition instead of reusing native codec state. */
+/**
+ * Resets the inactive player slot for another transition instead of constructing a new ExoPlayer
+ * after every crossfade. If a reset operation fails, fall back to the previous release/recreate
+ * behavior so a questionable player instance is not reused.
+ */
 internal fun MusicPlaybackService.recycleStandbyPlayerImpl() {
     if (!isStandbyPlayerInitialized()) return
     val oldPlayer = standbyPlayer
-    runCatching { oldPlayer.pause() }
-    runCatching { oldPlayer.stop() }
-    runCatching { oldPlayer.clearMediaItems() }
+    val reused = runCatching {
+        oldPlayer.pause()
+        oldPlayer.stop()
+        oldPlayer.clearMediaItems()
+        oldPlayer.volume = 0f
+        oldPlayer.repeatMode = Player.REPEAT_MODE_OFF
+        oldPlayer.shuffleModeEnabled = false
+        // The outgoing foreground player has audio-focus handling enabled. Restore the standby
+        // slot's no-focus role before it is used to preload the next crossfade.
+        oldPlayer.setAudioAttributes(musicAudioAttributes, false)
+        // A new item transition will apply the correct gain; don't let the prior track's cached
+        // applied value suppress that update when the slot is reused.
+        appliedReplayGainByPlayer.remove(oldPlayer)
+    }.onFailure {
+        Log.w("TunelystPlayback", "Could not reset the standby player; recreating it", it)
+    }.isSuccess
 
-    // Create the empty replacement before dropping the old instance, so a rare player-construction
-    // failure leaves a stopped, cleared player available for the next transition attempt.
+    if (reused) {
+        Log.i("TunelystPlayback", "Reused standby player slot: generation=$standbyPlayerGeneration")
+        return
+    }
+
+    // Preserve a clean fallback if reset fails, but do not create a replacement on the normal path.
     val replacement = runCatching { createStandbyPlayerImpl() }
-        .onFailure { Log.w("TunelystPlayback", "Could not recreate the standby player after a transition", it) }
+        .onFailure { Log.w("TunelystPlayback", "Could not recreate the standby player after reset failure", it) }
         .getOrNull() ?: return
     standbyPlayer = replacement
-
-    releaseDetachedPlayerImpl(oldPlayer, "standby recycle")
+    releaseDetachedPlayerImpl(oldPlayer, "standby reset fallback")
 }
 
 /** Releases all service-owned listener and audio-effect state for a player that is no longer active. */
