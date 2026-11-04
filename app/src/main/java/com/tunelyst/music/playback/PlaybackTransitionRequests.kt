@@ -26,7 +26,9 @@ internal data class PlaybackTransitionRequest(
     /** Keep the active queue and seek within it instead of replacing it when no fade is configured. */
     val keepCurrentQueue: Boolean = false,
     /** Preserve the active player's precomputed shuffle order for an in-queue transition. */
-    val copyCurrentShuffleOrder: Boolean = false
+    val copyCurrentShuffleOrder: Boolean = false,
+    /** Compact queue identity used to reject stale in-queue transitions without retaining the queue. */
+    val sourceQueueFingerprint: Long? = null
 )
 
 /** Builds a service-owned transition request for a skip within the currently playing queue. */
@@ -37,23 +39,45 @@ internal fun inQueueTransitionRequest(
 ): PlaybackTransitionRequest? {
     if (startIndex !in 0 until player.mediaItemCount) return null
     return PlaybackTransitionRequest(
-        mediaItems = (0 until player.mediaItemCount).map(player::getMediaItemAt),
+        // The service can resolve this index from its current queue. Avoid snapshotting the whole
+        // playlist for every ordinary skip; it only needs a full copy if a manual fade is enabled.
+        mediaItems = emptyList(),
         startIndex = startIndex,
         startPositionMs = startPositionMs,
         repeatMode = player.repeatMode,
         shuffleModeEnabled = player.shuffleModeEnabled,
         playWhenReady = player.playWhenReady,
         keepCurrentQueue = true,
-        copyCurrentShuffleOrder = true
+        copyCurrentShuffleOrder = true,
+        sourceQueueFingerprint = playerQueueFingerprint(player)
     )
+}
+
+/** A compact, order-sensitive queue identity for matching an in-queue request to the service state. */
+internal fun playerQueueFingerprint(player: Player): Long {
+    var fingerprint = -3750763034362895579L // FNV-1a 64-bit offset basis
+    val prime = 1099511628211L
+    for (index in 0 until player.mediaItemCount) {
+        player.getMediaItemAt(index).mediaId.forEach { character ->
+            fingerprint = (fingerprint xor character.code.toLong()) * prime
+        }
+        fingerprint = (fingerprint xor 0xffL) * prime
+    }
+    return (fingerprint xor player.mediaItemCount.toLong()) * prime
 }
 
 /**
  * The Activity and MediaSessionService run in the same app process. Keeping queue snapshots here
- * avoids sending potentially large playlists through Binder as custom-command extras.
+ * avoids sending potentially large playlists through Binder as custom-command extras. Ordinary
+ * in-queue transitions carry only an index and compact fingerprint; queue-replacement requests
+ * still carry their required MediaItems here.
  */
 internal object PendingPlaybackTransitionRequests {
-    private data class Entry(val request: PlaybackTransitionRequest, val expiresAtElapsedMs: Long)
+    private data class Entry(
+        val request: PlaybackTransitionRequest,
+        val expiresAtElapsedMs: Long,
+        val cleanupRunnable: Runnable
+    )
 
     private const val REQUEST_LIFETIME_MS = 30_000L
     private val requests = ConcurrentHashMap<String, Entry>()
@@ -61,19 +85,28 @@ internal object PendingPlaybackTransitionRequests {
 
     fun register(request: PlaybackTransitionRequest): String {
         val requestId = UUID.randomUUID().toString()
-        val entry = Entry(request, SystemClock.elapsedRealtime() + REQUEST_LIFETIME_MS)
+        val expiresAtElapsedMs = SystemClock.elapsedRealtime() + REQUEST_LIFETIME_MS
+        // Capture only the ID, never the Entry/PlaybackTransitionRequest: the Handler must not
+        // retain a queue snapshot for the full timeout after the service has already taken it.
+        val cleanupRunnable = Runnable { requests.remove(requestId) }
+        val entry = Entry(request, expiresAtElapsedMs, cleanupRunnable)
         requests[requestId] = entry
-        cleanupHandler.postDelayed({ requests.remove(requestId, entry) }, REQUEST_LIFETIME_MS)
+        if (!cleanupHandler.postDelayed(cleanupRunnable, REQUEST_LIFETIME_MS)) {
+            requests.remove(requestId, entry)
+        }
         return requestId
     }
 
     fun take(requestId: String): PlaybackTransitionRequest? {
         val entry = requests.remove(requestId) ?: return null
+        cleanupHandler.removeCallbacks(entry.cleanupRunnable)
         return entry.request.takeIf { SystemClock.elapsedRealtime() <= entry.expiresAtElapsedMs }
     }
 
     fun discard(requestId: String) {
-        requests.remove(requestId)
+        requests.remove(requestId)?.let { entry ->
+            cleanupHandler.removeCallbacks(entry.cleanupRunnable)
+        }
     }
 }
 

@@ -18,6 +18,34 @@ class PlaybackMemoryGuardPolicyTest {
     }
 
     @Test
+    fun pressurePrefersTotalProcessPssAndFallsBackToNativeMetrics() {
+        assertEquals(
+            800L,
+            PlaybackMemoryGuardPolicy.pressureBytes(
+                totalPssBytes = 800L,
+                nativePssBytes = 300L,
+                nativeHeapAllocatedBytes = 200L
+            )
+        )
+        assertEquals(
+            300L,
+            PlaybackMemoryGuardPolicy.pressureBytes(
+                totalPssBytes = 0L,
+                nativePssBytes = 300L,
+                nativeHeapAllocatedBytes = 200L
+            )
+        )
+        assertEquals(
+            200L,
+            PlaybackMemoryGuardPolicy.pressureBytes(
+                totalPssBytes = 0L,
+                nativePssBytes = 0L,
+                nativeHeapAllocatedBytes = 200L
+            )
+        )
+    }
+
+    @Test
     fun firstRecoveryUsesAbsoluteThresholdEvenWithHighStartupBaseline() {
         val mib = 1024L * 1024L
         val threshold = 500L * mib

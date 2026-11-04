@@ -123,17 +123,29 @@ internal fun MusicPlaybackService.requestManualTransitionToIndexImpl(index: Int,
 }
 
 internal fun MusicPlaybackService.transitionToQueueImpl(request: PlaybackTransitionRequest): Boolean {
-    if (!isForegroundPlayerInitialized() || request.mediaItems.isEmpty() ||
-        request.startIndex !in request.mediaItems.indices
-    ) return false
+    if (!isForegroundPlayerInitialized()) return false
     val source = foregroundPlayer
-    val targetMediaItem = request.mediaItems[request.startIndex]
+    if (request.keepCurrentQueue) {
+        if (request.startIndex !in 0 until source.mediaItemCount) return false
+    } else if (request.mediaItems.isEmpty() || request.startIndex !in request.mediaItems.indices) {
+        return false
+    }
+    val targetMediaItem = if (request.keepCurrentQueue) {
+        source.getMediaItemAt(request.startIndex)
+    } else {
+        request.mediaItems[request.startIndex]
+    }
     lastManualTransitionDebugEvent = "request:${targetMediaItem.mediaId}/source=${source.currentMediaItem?.mediaId}"
 
+    val requestQueueMatchesSource = if (request.keepCurrentQueue) {
+        request.sourceQueueFingerprint != null && request.sourceQueueFingerprint == playerQueueFingerprint(source)
+    } else {
+        queuesHaveSameIds(request.mediaItems, source)
+    }
     val isEquivalentAutomaticTarget = crossfading && crossfadeKind == CrossfadeKind.AUTOMATIC &&
         targetMediaItem.mediaId == targetMediaId && request.startIndex == preparedNextIndex &&
         request.repeatMode == source.repeatMode && request.shuffleModeEnabled == source.shuffleModeEnabled &&
-        queuesHaveSameIds(request.mediaItems, source)
+        requestQueueMatchesSource
     if (isEquivalentAutomaticTarget) {
         completeCrossfade()
         return true
@@ -161,15 +173,27 @@ internal fun MusicPlaybackService.transitionToQueueImpl(request: PlaybackTransit
         return true
     }
 
+    val manualTransitionSourceQueueSnapshot = (0 until source.mediaItemCount).map(source::getMediaItemAt)
+    val manualTransitionItems = if (request.keepCurrentQueue) {
+        manualTransitionSourceQueueSnapshot
+    } else {
+        request.mediaItems
+    }
+    val manualRequest = if (request.keepCurrentQueue) {
+        request.copy(mediaItems = manualTransitionItems)
+    } else {
+        request
+    }
+
     ensureStandbyPlayer()
-    pendingManualTransition = request
+    pendingManualTransition = manualRequest
     activeManualTransition = null
     manualTransitionSourceMediaId = source.currentMediaItem?.mediaId
-    manualTransitionSourceQueue = (0 until source.mediaItemCount).map(source::getMediaItemAt)
+    manualTransitionSourceQueue = manualTransitionSourceQueueSnapshot
     manualTransitionSourceRepeatMode = source.repeatMode
     manualTransitionSourceShuffleEnabled = source.shuffleModeEnabled
     lastManualTransitionDebugEvent = "pending:${targetMediaItem.mediaId}"
-    preparedNextIndex = request.startIndex
+    preparedNextIndex = manualRequest.startIndex
     targetMediaId = targetMediaItem.mediaId
     fadeSourceIndex = source.currentMediaItemIndex
     fadeStartPositionMs = 0L
@@ -184,12 +208,12 @@ internal fun MusicPlaybackService.transitionToQueueImpl(request: PlaybackTransit
     manualFadeStartedAtElapsedMs = 0L
 
     standbyPlayer.volume = 0f
-    standbyPlayer.repeatMode = request.repeatMode
-    standbyPlayer.setMediaItems(request.mediaItems, request.startIndex, request.startPositionMs)
-    if (request.copyCurrentShuffleOrder && source.shuffleModeEnabled) {
+    standbyPlayer.repeatMode = manualRequest.repeatMode
+    standbyPlayer.setMediaItems(manualTransitionItems, manualRequest.startIndex, manualRequest.startPositionMs)
+    if (manualRequest.copyCurrentShuffleOrder && source.shuffleModeEnabled) {
         standbyPlayer.setShuffleOrder(source.shuffleOrder)
     }
-    standbyPlayer.shuffleModeEnabled = request.shuffleModeEnabled
+    standbyPlayer.shuffleModeEnabled = manualRequest.shuffleModeEnabled
     standbyPlayer.prepare()
     scheduleManualTransitionTimeout()
     maybeBeginManualTransition()

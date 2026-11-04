@@ -72,6 +72,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -171,6 +172,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     internal var radioActive = false
     internal var autoShuffleJob: Job? = null
     internal var replayGainEnrichmentJob: Job? = null
+    /** Serializes blocking tag reads so cancelled scans cannot overlap one read per track switch. */
+    internal val replayGainEnrichmentMutex = Mutex()
     internal var playbackGeneration = 0L
     internal var smartShuffleActive = false
     internal var preserveCurrentQueueOrder = false
