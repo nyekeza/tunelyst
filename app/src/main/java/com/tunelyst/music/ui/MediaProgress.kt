@@ -1,7 +1,8 @@
 package com.tunelyst.music.ui
 
 import android.content.Context
-import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -28,6 +29,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.unit.dp
 import androidx.palette.graphics.Palette
+import coil.imageLoader
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import coil.size.Precision
+import coil.request.SuccessResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.pow
@@ -43,7 +50,7 @@ internal val NowPlayingPalettes = listOf(
 /** Samples local album art and keeps the last palette visible until a new sample is ready. */
 @Composable
 internal fun rememberArtworkPalette(artworkUri: Uri?, fallbackSeed: String): List<Color> {
-    val context = LocalContext.current
+    val context = LocalContext.current.applicationContext
     val fallback = remember(fallbackSeed) {
         val colors = NowPlayingPalettes[(fallbackSeed.hashCode().ushr(1)) % NowPlayingPalettes.size]
         listOf(colors.first(), blendArtworkColors(colors.first(), colors.last(), 0.5f), colors.last())
@@ -60,29 +67,35 @@ internal fun rememberArtworkPalette(artworkUri: Uri?, fallbackSeed: String): Lis
     return paletteState.value
 }
 
-private fun extractArtworkPalette(context: Context, artworkUri: Uri): List<Color>? = try {
-    val options = BitmapFactory.Options().apply {
-        inSampleSize = 4
-        inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
-    }
-    val bitmap = context.contentResolver.openInputStream(artworkUri)?.use { stream ->
-        BitmapFactory.decodeStream(stream, null, options)
-    } ?: return null
-    try {
-        val palette = Palette.from(bitmap).maximumColorCount(16).generate()
-        val dominant = palette.dominantSwatch?.rgb ?: palette.mutedSwatch?.rgb ?: return null
-        val accent = palette.vibrantSwatch?.rgb
-            ?: palette.lightVibrantSwatch?.rgb
-            ?: palette.darkVibrantSwatch?.rgb
-            ?: dominant
-        val shadow = palette.darkMutedSwatch?.rgb ?: palette.darkVibrantSwatch?.rgb ?: dominant
-        listOf(Color(dominant), Color(accent), Color(shadow))
-    } finally {
-        bitmap.recycle()
-    }
+private suspend fun extractArtworkPalette(context: Context, artworkUri: Uri): List<Color>? = try {
+    // Coil owns decoding/cancellation. The palette-only request is explicitly tiny and excluded
+    // from both caches, so rapid skips cannot enqueue full-resolution bitmap decodes per URI.
+    val request = ImageRequest.Builder(context.applicationContext)
+        .data(artworkUri)
+        .size(PALETTE_SAMPLE_SIZE_PX, PALETTE_SAMPLE_SIZE_PX)
+        .precision(Precision.INEXACT)
+        .allowHardware(false)
+        .bitmapConfig(Bitmap.Config.RGB_565)
+        .memoryCachePolicy(CachePolicy.DISABLED)
+        .diskCachePolicy(CachePolicy.DISABLED)
+        .build()
+    val result = context.applicationContext.imageLoader.execute(request) as? SuccessResult ?: return null
+    val bitmap = (result.drawable as? BitmapDrawable)?.bitmap ?: return null
+    val palette = Palette.from(bitmap).maximumColorCount(16).generate()
+    val dominant = palette.dominantSwatch?.rgb ?: palette.mutedSwatch?.rgb ?: return null
+    val accent = palette.vibrantSwatch?.rgb
+        ?: palette.lightVibrantSwatch?.rgb
+        ?: palette.darkVibrantSwatch?.rgb
+        ?: dominant
+    val shadow = palette.darkMutedSwatch?.rgb ?: palette.darkVibrantSwatch?.rgb ?: dominant
+    listOf(Color(dominant), Color(accent), Color(shadow))
+} catch (cancelled: CancellationException) {
+    throw cancelled
 } catch (_: Exception) {
     null
 }
+
+private const val PALETTE_SAMPLE_SIZE_PX = 128
 
 internal fun blendArtworkColors(from: Color, to: Color, amount: Float): Color {
     val fraction = amount.coerceIn(0f, 1f)

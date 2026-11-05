@@ -1,5 +1,6 @@
 package com.tunelyst.music.playback
 
+import android.app.ActivityManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.SharedPreferences
@@ -24,7 +25,9 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -33,6 +36,7 @@ import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.tunelyst.music.MainActivity
+import com.tunelyst.music.core.logic.isTunelystLowMemoryDevice
 import com.tunelyst.music.data.AudioSettingsContract
 import com.tunelyst.music.data.AudioSettingsStore
 import com.tunelyst.music.data.CrossfadeCurve
@@ -43,8 +47,14 @@ import kotlin.math.roundToInt
 /** Owns playback outside the Activity so music and media controls survive navigation/backgrounding. */
 @OptIn(UnstableApi::class)
 class MusicPlaybackService : MediaSessionService() {
-    internal lateinit var foregroundPlayer: ExoPlayer
-    internal lateinit var standbyPlayer: ExoPlayer
+    // The foreground slot is the single service-owned player used for ordinary track changes.
+    // A second player is created only when a crossfade needs an overlapping decode.
+    internal var foregroundPlayerRef: ExoPlayer? = null
+    internal val foregroundPlayer: ExoPlayer
+        get() = checkNotNull(foregroundPlayerRef) { "Foreground player is not initialized" }
+    internal var standbyPlayerRef: ExoPlayer? = null
+    internal val standbyPlayer: ExoPlayer
+        get() = checkNotNull(standbyPlayerRef) { "Standby player is not initialized" }
     internal lateinit var mediaSession: MediaSession
     internal lateinit var audioPreferences: SharedPreferences
     internal lateinit var audioSettingsStore: AudioSettingsStore
@@ -63,8 +73,8 @@ class MusicPlaybackService : MediaSessionService() {
     internal var memoryGuardRecoveryAttemptCount = 0
     internal var memoryGuardRecycleCount = 0
 
-    internal fun isForegroundPlayerInitialized(): Boolean = ::foregroundPlayer.isInitialized
-    internal fun isStandbyPlayerInitialized(): Boolean = ::standbyPlayer.isInitialized
+    internal fun isForegroundPlayerInitialized(): Boolean = foregroundPlayerRef != null
+    internal fun isStandbyPlayerInitialized(): Boolean = standbyPlayerRef != null
     internal fun isAudioSettingsStoreInitialized(): Boolean = ::audioSettingsStore.isInitialized
     internal fun isAudioSettingsInitialized(): Boolean = ::audioSettings.isInitialized
 
@@ -79,7 +89,7 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     internal val playerListeners = mutableMapOf<ExoPlayer, Player.Listener>()
-    internal val pendingPlaybackErrorRecoveries = mutableSetOf<Runnable>()
+    internal val pendingPlaybackErrorRecoveries = mutableMapOf<ExoPlayer, Runnable>()
     internal val appliedReplayGainByPlayer = mutableMapOf<ExoPlayer, AppliedReplayGain>()
     internal val audioSessionIds = mutableMapOf<ExoPlayer, Int>()
     internal val equalizers = mutableMapOf<ExoPlayer, Equalizer>()
@@ -199,15 +209,20 @@ class MusicPlaybackService : MediaSessionService() {
                 applyManualTransitionImmediately(manualRequest, restoreVolume = !sleepTimerFadeActive)
             }
         }
+        if (audioSettings.crossfadeSeconds == 0 && audioSettings.manualSkipFadeSeconds == 0 &&
+            !crossfading && pendingManualTransition == null && activeManualTransition == null
+        ) {
+            releaseStandbyPlayer("crossfades disabled")
+        }
     }
 
     internal val crossfadeTicker: Runnable = object : Runnable {
         override fun run() {
-            if (::foregroundPlayer.isInitialized) {
+            if (isForegroundPlayerInitialized()) {
                 updateSleepTimer()
                 recoverUnexpectedReadyPause()
                 applyReplayGain(foregroundPlayer, foregroundPlayer.currentMediaItem)
-                if (::standbyPlayer.isInitialized) {
+                if (isStandbyPlayerInitialized()) {
                     applyReplayGain(standbyPlayer, standbyPlayer.currentMediaItem)
                 }
                 updateCrossfade()
@@ -226,33 +241,52 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
-        audioPreferences = getSharedPreferences(AudioSettingsContract.PREFERENCES_NAME, MODE_PRIVATE)
-        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-        audioSettingsStore = AudioSettingsStore(this)
-        audioSettings = readAudioSettings()
-        refreshSleepTimerSchedule()
-        audioPreferences.registerOnSharedPreferenceChangeListener(settingsListener)
+        var initialPlayer: ExoPlayer? = null
+        try {
+            audioPreferences = getSharedPreferences(AudioSettingsContract.PREFERENCES_NAME, MODE_PRIVATE)
+            audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+            audioSettingsStore = AudioSettingsStore(this)
+            audioSettings = readAudioSettings()
+            refreshSleepTimerSchedule()
+            audioPreferences.registerOnSharedPreferenceChangeListener(settingsListener)
 
-        foregroundPlayer = createPlayer(handleAudioFocus = true)
-        foregroundPlayerGeneration = 1
-        installListener(foregroundPlayer)
-        applyPlaybackParameters()
-        applyLoudnessSettings()
-        val sessionActivity = PendingIntent.getActivity(
-            this,
-            SESSION_ACTIVITY_REQUEST_CODE,
-            Intent(this, MainActivity::class.java)
-                .setAction(MainActivity.ACTION_OPEN_NOW_PLAYING)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        mediaSession = MediaSession.Builder(this, createSessionPlayer(foregroundPlayer))
-            .setCallback(mediaSessionCallback)
-            .setSessionActivity(sessionActivity)
-            .build()
-        runCatching { audioManager.registerAudioDeviceCallback(outputDeviceCallback, mainHandler) }
-        initializePlaybackMemoryGuard()
-        mainHandler.post(crossfadeTicker)
+            val player = createPlayer(handleAudioFocus = true)
+            initialPlayer = player
+            foregroundPlayerRef = player
+            foregroundPlayerGeneration = 1
+            installListener(player)
+            applyPlaybackParameters()
+            applyLoudnessSettings()
+            val sessionActivity = PendingIntent.getActivity(
+                this,
+                SESSION_ACTIVITY_REQUEST_CODE,
+                Intent(this, MainActivity::class.java)
+                    .setAction(MainActivity.ACTION_OPEN_NOW_PLAYING)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            mediaSession = MediaSession.Builder(this, createSessionPlayer(player))
+                .setCallback(mediaSessionCallback)
+                .setSessionActivity(sessionActivity)
+                .build()
+            runCatching { audioManager.registerAudioDeviceCallback(outputDeviceCallback, mainHandler) }
+            initializePlaybackMemoryGuard()
+            mainHandler.post(crossfadeTicker)
+        } catch (failure: Throwable) {
+            mainHandler.removeCallbacksAndMessages(null)
+            CrossfadeDisplayState.clearIncoming()
+            if (::mediaSession.isInitialized) runCatching { mediaSession.release() }
+            if (::audioManager.isInitialized) {
+                runCatching { audioManager.unregisterAudioDeviceCallback(outputDeviceCallback) }
+            }
+            if (::audioPreferences.isInitialized) {
+                runCatching { audioPreferences.unregisterOnSharedPreferenceChangeListener(settingsListener) }
+            }
+            foregroundPlayerRef = null
+            standbyPlayerRef = null
+            initialPlayer?.let { releaseDetachedPlayerImpl(it, "service initialization failed") }
+            throw failure
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
@@ -260,8 +294,8 @@ class MusicPlaybackService : MediaSessionService() {
     internal fun manualTransitionDebugState(): String = this.manualTransitionDebugStateImpl()
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val state = if (::foregroundPlayer.isInitialized) foregroundPlayer.playbackState else Player.STATE_IDLE
-        val playbackShouldContinue = ::foregroundPlayer.isInitialized &&
+        val state = if (isForegroundPlayerInitialized()) foregroundPlayer.playbackState else Player.STATE_IDLE
+        val playbackShouldContinue = isForegroundPlayerInitialized() &&
             (foregroundPlayer.isPlaying ||
                 (foregroundPlayer.playWhenReady && state != Player.STATE_IDLE && state != Player.STATE_ENDED))
         if (playbackShouldContinue) {
@@ -274,43 +308,86 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
-        mainHandler.removeCallbacks(crossfadeTicker)
+        mainHandler.removeCallbacksAndMessages(null)
         CrossfadeDisplayState.clearIncoming()
-        manualTransitionTimeout?.let(mainHandler::removeCallbacks)
         manualTransitionTimeout = null
         pendingManualTransition = null
         activeManualTransition = null
-        pendingPlaybackErrorRecoveries.forEach { mainHandler.removeCallbacks(it) }
-        pendingPlaybackErrorRecoveries.clear()
+        manualTransitionSourceQueue = null
         if (::audioManager.isInitialized) runCatching { audioManager.unregisterAudioDeviceCallback(outputDeviceCallback) }
         if (::audioPreferences.isInitialized) audioPreferences.unregisterOnSharedPreferenceChangeListener(settingsListener)
-        equalizers.values.forEach { runCatching { it.release() } }
+
+        // Release the MediaSession first so it stops forwarding to either player. Null service
+        // references before release so no later recovery path can accidentally reuse a dead player.
+        if (::mediaSession.isInitialized) runCatching { mediaSession.release() }
+        val playersToRelease = (
+            listOfNotNull(foregroundPlayerRef, standbyPlayerRef) +
+                playerListeners.keys + equalizers.keys + equalizerSessionIds.keys +
+                loudnessEnhancers.keys + loudnessEnhancerSessionIds.keys + audioSessionIds.keys +
+                appliedReplayGainByPlayer.keys + pendingPlaybackErrorRecoveries.keys
+            ).distinct()
+        foregroundPlayerRef = null
+        standbyPlayerRef = null
+        playersToRelease.forEach { releaseDetachedPlayer(it, "playback service destroyed") }
+        pendingPlaybackErrorRecoveries.clear()
+        playerListeners.clear()
         equalizers.clear()
         equalizerSessionIds.clear()
         audioSessionIds.clear()
-        loudnessEnhancers.keys.toList().forEach(::releaseLoudnessEnhancer)
+        loudnessEnhancers.clear()
         loudnessEnhancerSessionIds.clear()
         appliedReplayGainByPlayer.clear()
-        if (::mediaSession.isInitialized) mediaSession.release()
-        if (::foregroundPlayer.isInitialized) foregroundPlayer.release()
-        if (::standbyPlayer.isInitialized) standbyPlayer.release()
-        playerListeners.clear()
         super.onDestroy()
     }
 
     internal fun createPlayer(handleAudioFocus: Boolean): ExoPlayer {
+        val bufferPolicy = PlaybackBufferPolicy.forLowMemoryDevice(isLowMemoryDevice())
+        val loadControl = DefaultLoadControl.Builder()
+            .setAllocator(DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
+            .setBufferDurationsMs(
+                bufferPolicy.minBufferMs,
+                bufferPolicy.maxBufferMs,
+                bufferPolicy.bufferForPlaybackMs,
+                bufferPolicy.bufferForPlaybackAfterRebufferMs
+            )
+            .setBufferDurationsMsForLocalPlayback(
+                bufferPolicy.minBufferMs,
+                bufferPolicy.maxBufferMs,
+                bufferPolicy.bufferForPlaybackMs,
+                bufferPolicy.bufferForPlaybackAfterRebufferMs
+            )
+            .setTargetBufferBytes(bufferPolicy.targetBufferBytes)
+            .setPrioritizeTimeOverSizeThresholdsForStreaming(false)
+            .setPrioritizeTimeOverSizeThresholdsForLocalPlayback(false)
+            .setBackBuffer(0, false)
+            .build()
         val player = ExoPlayer.Builder(this)
             .setAudioAttributes(musicAudioAttributes, handleAudioFocus)
             .setHandleAudioBecomingNoisy(true)
+            .setLoadControl(loadControl)
             // Keep the CPU awake while local files are decoded and transitions are serviced in background.
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
-        // Tunelyst is an audio-only player. Files with a video stream (for example, music videos
-        // indexed as audio) must not create a native video decoder when no video surface exists.
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
-            .build()
-        return player
+        try {
+            // Tunelyst is an audio-only player. Files with a video stream (for example, music videos
+            // indexed as audio) must not create a native video decoder when no video surface exists.
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                .build()
+            return player
+        } catch (failure: Throwable) {
+            runCatching { player.release() }
+            throw failure
+        }
+    }
+
+    private fun isLowMemoryDevice(): Boolean {
+        val activityManager = getSystemService(ACTIVITY_SERVICE) as? ActivityManager
+        return isTunelystLowMemoryDevice(
+            platformLowRam = activityManager?.isLowRamDevice == true,
+            memoryClassMb = activityManager?.memoryClass ?: Int.MAX_VALUE,
+            maxHeapBytes = Runtime.getRuntime().maxMemory()
+        )
     }
 
     /** Route controller track changes through the service so it can own both players' gain curves. */
@@ -399,6 +476,11 @@ class MusicPlaybackService : MediaSessionService() {
     internal fun ensureStandbyPlayer(): ExoPlayer = this.ensureStandbyPlayerImpl()
 
     internal fun recycleStandbyPlayer() = this.recycleStandbyPlayerImpl()
+
+    internal fun releaseStandbyPlayer(reason: String) = this.releaseStandbyPlayerImpl(reason)
+
+    internal fun releaseDetachedPlayer(target: ExoPlayer, reason: String) =
+        this.releaseDetachedPlayerImpl(target, reason)
 
     @OptIn(UnstableApi::class)
     internal fun installListener(target: ExoPlayer) = this.installListenerImpl(target)

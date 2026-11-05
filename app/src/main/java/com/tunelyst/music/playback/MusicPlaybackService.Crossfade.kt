@@ -313,6 +313,8 @@ internal fun MusicPlaybackService.applyQueueToForegroundImpl(request: PlaybackTr
         clearCrossfadeCancelVolumeRestore()
     }
     if (request.keepCurrentQueue) {
+        // Keep the foreground instance for an ordinary skip. Media3 releases the old media period
+        // on seek; its allocator is size-capped and retains only bounded reusable segments.
         foregroundPlayer.seekTo(request.startIndex, request.startPositionMs)
         if (request.playWhenReady) foregroundPlayer.play() else foregroundPlayer.pause()
         return
@@ -395,9 +397,9 @@ internal fun MusicPlaybackService.completeCrossfadeImpl() {
     incoming.volume = 1f
     outgoing.volume = 0f
     incoming.setAudioAttributes(musicAudioAttributes, true)
-    foregroundPlayer = incoming
+    foregroundPlayerRef = incoming
     foregroundPlayerGeneration++
-    standbyPlayer = outgoing
+    standbyPlayerRef = outgoing
     mediaSession.setPlayer(createSessionPlayer(foregroundPlayer))
     crossfading = false
     crossfadeKind = null

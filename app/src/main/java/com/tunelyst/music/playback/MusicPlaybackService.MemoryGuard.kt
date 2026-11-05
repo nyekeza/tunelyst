@@ -144,14 +144,49 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
     )
 
     var replacement: ExoPlayer? = null
-    var foregroundSwapped = false
-    var sessionSwapped = false
+    var foregroundDetached = false
+    var oldListenerDetached = false
     var oldPlayerReleased = false
+
+    fun restoreReleasedPlayer(target: ExoPlayer): Boolean = runCatching {
+        installListener(target)
+        target.setMediaItems(queue, currentIndex, currentPositionMs)
+        target.setShuffleOrder(shuffleOrder)
+        target.repeatMode = repeatMode
+        target.shuffleModeEnabled = shuffleModeEnabled
+        target.setPlaybackParameters(playbackParameters)
+        target.trackSelectionParameters = trackSelectionParameters
+        target.volume = volume
+        foregroundPlayerRef = target
+        foregroundPlayerGeneration = previousForegroundGeneration + 1
+        mediaSession.setPlayer(createSessionPlayer(target))
+        target.prepare()
+        if (resumePlayback) target.play() else target.pause()
+        unexpectedPauseStartedAtElapsedMs = 0L
+        memoryGuardLastSampleElapsedMs = SystemClock.elapsedRealtime()
+    }.onFailure {
+        Log.e("TunelystPlayback", "Could not restore playback on a replacement player", it)
+    }.isSuccess
+
     try {
-        // Stop first so renderers and loaded media are torn down before constructing the new player.
-        // Keep the playlist on the old player until the MediaSession has atomically moved to the new one.
+        // An idle standby is optional. Release it before rebuilding the active slot so the recovery
+        // path cannot keep a second allocator/effect set alive under memory pressure.
+        if (isStandbyPlayerInitialized()) releaseStandbyPlayerImpl("memory recovery")
+
+        // Tear down and release the foreground instance before creating its replacement. Keep only
+        // the small immutable queue/state snapshot so peak player, decoder, buffer, and effect memory
+        // does not overlap during this emergency recovery.
         oldPlayer.pause()
         oldPlayer.stop()
+        oldPlayer.clearMediaItems()
+        playerListeners.remove(oldPlayer)?.let { listener ->
+            runCatching { oldPlayer.removeListener(listener) }
+            oldListenerDetached = true
+        }
+        foregroundPlayerRef = null
+        foregroundDetached = true
+        releaseDetachedPlayerImpl(oldPlayer, "memory recovery")
+        oldPlayerReleased = true
 
         replacement = createPlayer(handleAudioFocus = true)
         installListener(replacement)
@@ -166,19 +201,9 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         // Swap the service's foreground reference and MediaSession together. The same MediaSession
         // remains alive, so controllers keep their commands and the same-song queue update is not a
         // new listening session in the ViewModel.
-        foregroundPlayer = replacement
+        foregroundPlayerRef = replacement
         foregroundPlayerGeneration = previousForegroundGeneration + 1
-        foregroundSwapped = true
         mediaSession.setPlayer(createSessionPlayer(replacement))
-        sessionSwapped = true
-
-        // Tear down the detached player before preparing a decoder in the replacement. This keeps
-        // peak native usage lower and ensures old audio-fx sessions cannot outlive their player.
-        oldPlayer.stop()
-        oldPlayer.clearMediaItems()
-        releaseDetachedPlayerImpl(oldPlayer, "memory recovery")
-        oldPlayerReleased = true
-
         replacement.prepare()
         if (resumePlayback) replacement.play() else replacement.pause()
         unexpectedPauseStartedAtElapsedMs = 0L
@@ -199,15 +224,11 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         Log.e("TunelystPlayback", "Foreground ExoPlayer replacement failed ($reason)", failure)
         val failedReplacement = replacement
         if (!oldPlayerReleased) {
-            if (foregroundSwapped) {
-                foregroundPlayer = oldPlayer
-                foregroundPlayerGeneration = previousForegroundGeneration
+            if (foregroundDetached) foregroundPlayerRef = oldPlayer
+            if (oldListenerDetached) {
+                runCatching { installListener(oldPlayer) }
+                    .onFailure { Log.e("TunelystPlayback", "Could not restore the foreground player listener", it) }
             }
-            if (sessionSwapped || foregroundSwapped) {
-                runCatching { mediaSession.setPlayer(createSessionPlayer(oldPlayer)) }
-                    .onFailure { Log.e("TunelystPlayback", "Could not restore the MediaSession to the previous player", it) }
-            }
-            failedReplacement?.let { releaseDetachedPlayerImpl(it, "failed memory recovery replacement") }
             runCatching {
                 oldPlayer.setMediaItems(queue, currentIndex, currentPositionMs)
                 oldPlayer.setShuffleOrder(shuffleOrder)
@@ -219,20 +240,38 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
                 oldPlayer.prepare()
                 if (resumePlayback) oldPlayer.play() else oldPlayer.pause()
             }.onFailure { Log.e("TunelystPlayback", "Could not resume the previous player after replacement failure", it) }
-        } else if (failedReplacement != null) {
-            // A failure after releasing the old player is rare (prepare/play normally report async
-            // errors through Player.Listener). Keep the new session usable if a synchronous error occurs.
-            runCatching {
-                failedReplacement.setMediaItems(queue, currentIndex, currentPositionMs)
-                failedReplacement.setShuffleOrder(shuffleOrder)
-                failedReplacement.repeatMode = repeatMode
-                failedReplacement.shuffleModeEnabled = shuffleModeEnabled
-                failedReplacement.setPlaybackParameters(playbackParameters)
-                failedReplacement.trackSelectionParameters = trackSelectionParameters
-                failedReplacement.volume = volume
-                failedReplacement.prepare()
-                if (resumePlayback) failedReplacement.play() else failedReplacement.pause()
-            }.onFailure { Log.e("TunelystPlayback", "Could not restart the replacement player", it) }
+        } else {
+            var recovered = failedReplacement != null && restoreReleasedPlayer(failedReplacement)
+            if (!recovered && failedReplacement != null) {
+                foregroundPlayerRef = null
+                releaseDetachedPlayerImpl(failedReplacement, "failed memory recovery replacement")
+            }
+            if (!recovered) {
+                val fallback = runCatching { createPlayer(handleAudioFocus = true) }
+                    .onFailure { Log.e("TunelystPlayback", "Could not create a fallback player after memory recovery failed", it) }
+                    .getOrNull()
+                if (fallback != null) {
+                    recovered = restoreReleasedPlayer(fallback)
+                    if (!recovered) {
+                        foregroundPlayerRef = null
+                        releaseDetachedPlayerImpl(fallback, "failed fallback memory recovery replacement")
+                    }
+                }
+            }
+            if (recovered) {
+                val memoryAfter = readPlaybackMemorySample()
+                recordPlaybackMemorySample(memoryAfter)
+                memoryGuardRecoveryBaselinePressureBytes = memoryAfter.pressureBytes
+                Log.w(
+                    "TunelystPlayback",
+                    "Recovered playback using a replacement after a synchronous recovery error: " +
+                        "generation=$foregroundPlayerGeneration pressure=${memoryAfter.pressureBytes}"
+                )
+                return true
+            }
+            foregroundPlayerRef = null
+            foregroundPlayerGeneration = previousForegroundGeneration
+            Log.e("TunelystPlayback", "Playback could not be restored after the foreground player was released")
         }
         return false
     }

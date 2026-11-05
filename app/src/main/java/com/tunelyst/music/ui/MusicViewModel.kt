@@ -246,24 +246,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 mediaStoreObserver
             )
         }
-        if (!lowMemoryDevice) {
-            viewModelScope.launch(Dispatchers.IO) {
-                awaitAudioAnalysisIdle()
-                audioFeatureStore.loadCache()
-                for (song in audioFeatureRequests) {
-                    try {
-                        // Feature extraction starts a second decoder and uses a short PCM buffer.
-                        // Defer that work while playback is active so it cannot compete with the
-                        // foreground MediaSession, and keep the pending work queue strictly bounded.
-                        awaitAudioAnalysisIdle()
-                        audioFeatureStore.analyze(song)
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        // Unsupported decoders/providers simply leave this track on metadata-based ranking.
-                    } finally {
-                        queuedAudioFeatureIds.remove(song.id)
-                    }
+        viewModelScope.launch(Dispatchers.IO) {
+            // Run the bounded preference migration on every device, including low-memory devices,
+            // so legacy per-track keys cannot remain resident indefinitely after an upgrade.
+            audioFeatureStore.loadCache()
+            if (lowMemoryDevice) return@launch
+            awaitAudioAnalysisIdle()
+            for (song in audioFeatureRequests) {
+                try {
+                    // Feature extraction starts a second decoder and uses a short PCM buffer.
+                    // Defer that work while playback is active so it cannot compete with the
+                    // foreground MediaSession, and keep the pending work queue strictly bounded.
+                    awaitAudioAnalysisIdle()
+                    audioFeatureStore.analyze(song)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Unsupported decoders/providers simply leave this track on metadata-based ranking.
+                } finally {
+                    queuedAudioFeatureIds.remove(song.id)
                 }
             }
         }
@@ -800,8 +801,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     internal fun toMediaItem(song: Song): MediaItem = this.toMediaItemImpl(song)
 
     override fun onCleared() {
-        player?.let { sampleListeningSession(it, force = true) }
+        // Activity.onDestroy normally detaches first; repeat it here so other ViewModel teardown
+        // paths cannot leave this ViewModel captured by a MediaController listener.
+        detachPlayer()
         finishListeningSession(completed = false, skipped = false)
+        playerConnectionRetryAction = null
         // Do not cancel/clear the sleep timer here: the MediaSessionService continues playback
         // and owns its deadline/fade even after this Activity-scoped ViewModel is cleared.
         mediaStoreRefreshHandler.removeCallbacks(mediaStoreRefreshRunnable)

@@ -7,9 +7,10 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.SystemClock
+import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteOrder
-import java.util.concurrent.ConcurrentHashMap
+import java.util.TreeMap
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -28,51 +29,119 @@ data class LocalAudioFeatures(
     val analyzedDurationMs: Long
 )
 
-/** Persistent cache for derived audio descriptors. It is deliberately excluded from portable backups. */
+/** Persistent, bounded cache for derived audio descriptors (never album images or PCM). */
 class LocalAudioFeatureStore(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-    private val entries = ConcurrentHashMap<Long, CachedFeatures>()
+    private val cacheLock = Any()
+    private val entries = BoundedLruCache<Long, CachedFeatures>(MAX_CACHED_FEATURES)
 
-    /** Loads the small derived-feature cache on a worker thread before any ranking requests it. */
-    fun loadCache() {
-        preferences.all.forEach { (key, value) ->
-            val songId = key.removePrefix(KEY_PREFIX).toLongOrNull()
-                ?.takeIf { key.startsWith(KEY_PREFIX) && it >= 0L } ?: return@forEach
-            val raw = value as? String ?: return@forEach
-            val cached = runCatching {
-                val json = JSONObject(raw)
-                val tempo = if (json.isNull("tempo_bpm")) null else json.optDouble("tempo_bpm").toFloat()
-                val energy = json.optDouble("energy", Double.NaN).toFloat()
-                val confidence = json.optDouble("tempo_confidence", 0.0).toFloat()
-                if (!energy.isFinite() || !confidence.isFinite()) return@runCatching null
-                CachedFeatures(
-                    signature = json.optString("signature"),
-                    features = LocalAudioFeatures(
-                        tempoBpm = tempo?.takeIf { it.isFinite() && it in MIN_TEMPO_BPM..MAX_TEMPO_BPM },
-                        tempoConfidence = confidence.coerceIn(0f, 1f),
-                        energy = energy.coerceIn(0f, 1f),
-                        analyzedDurationMs = json.optLong("duration_ms", 0L).coerceAtLeast(0L)
-                    )
-                )
-            }.getOrNull() ?: return@forEach
-            entries[songId] = cached
+    /** Loads at most [MAX_CACHED_FEATURES] entries and migrates the older per-track preference keys. */
+    fun loadCache() = synchronized(cacheLock) {
+        entries.clear()
+        // Older versions wrote one SharedPreferences entry per analyzed track without eviction.
+        // Remove those keys during migration so SharedPreferences itself cannot retain an unbounded map.
+        val allPreferences = preferences.all
+        val hasLegacyKeys = allPreferences.keys.any { it.startsWith(LEGACY_KEY_PREFIX) }
+        val encodedValue = allPreferences[CACHE_KEY]
+        val encoded = encodedValue as? String
+        val cacheLoaded = encoded?.let { runCatching { loadEncodedCache(it) }.getOrDefault(false) } == true
+        var rewriteCache = (encodedValue != null && encoded == null) || (encoded != null && !cacheLoaded)
+
+        if (!cacheLoaded && hasLegacyKeys) {
+            // Keep only the 128 highest legacy IDs while scanning. This bounds temporary migration
+            // state even if an older installation accumulated thousands of per-track keys.
+            val newestEntries = TreeMap<Long, CachedFeatures>()
+            allPreferences.forEach { (key, value) ->
+                if (!key.startsWith(LEGACY_KEY_PREFIX)) return@forEach
+                val songId = key.removePrefix(LEGACY_KEY_PREFIX).toLongOrNull()
+                    ?.takeIf { it >= 0L } ?: return@forEach
+                val raw = value as? String ?: return@forEach
+                val cached = runCatching { parseCachedFeatures(JSONObject(raw)) }.getOrNull()
+                    ?: return@forEach
+                newestEntries[songId] = cached
+                if (newestEntries.size > MAX_CACHED_FEATURES) newestEntries.pollFirstEntry()
+            }
+            newestEntries.forEach { (songId, cached) -> entries.put(songId, cached) }
+            rewriteCache = true
+        }
+
+        if (hasLegacyKeys || rewriteCache) {
+            val editor = preferences.edit()
+            allPreferences.keys.forEach { key ->
+                if (key.startsWith(LEGACY_KEY_PREFIX)) editor.remove(key)
+            }
+            if (rewriteCache && entries.size() > 0) {
+                editor.putString(CACHE_KEY, encodeCache())
+            } else if (rewriteCache) {
+                editor.remove(CACHE_KEY)
+            }
+            editor.apply()
         }
     }
 
-    fun featuresFor(song: Song): LocalAudioFeatures? = entries[song.id]
-        ?.takeIf { it.signature == signature(song) }
-        ?.features
+    fun featuresFor(song: Song): LocalAudioFeatures? {
+        val currentSignature = signature(song)
+        return synchronized(cacheLock) {
+            entries[song.id]?.takeIf { it.signature == currentSignature }?.features
+        }
+    }
 
     /** Decode and analyze at most a short PCM window. Call from Dispatchers.IO. */
     fun analyze(song: Song): LocalAudioFeatures? {
         if (song.id < 0L) return null
         featuresFor(song)?.let { return it }
         val features = LocalAudioFeatureDecoder.analyze(appContext, song.uri, song.durationMs) ?: return null
-        val cached = CachedFeatures(signature(song), features)
-        entries[song.id] = cached
-        preferences.edit().putString(cacheKey(song.id), cached.toJson().toString()).apply()
+        synchronized(cacheLock) {
+            // Another request may have filled the same entry while this decode was running.
+            entries[song.id]?.takeIf { it.signature == signature(song) }?.let { return it.features }
+            entries.put(song.id, CachedFeatures(signature(song), features))
+            preferences.edit().putString(CACHE_KEY, encodeCache()).apply()
+        }
         return features
+    }
+
+    private fun loadEncodedCache(encoded: String): Boolean {
+        val root = JSONObject(encoded)
+        val ids = root.optJSONArray("ids") ?: return false
+        val items = root.optJSONObject("items") ?: return false
+        for (index in 0 until ids.length()) {
+            val songId = ids.optLong(index, -1L)
+            if (songId < 0L) continue
+            val json = items.optJSONObject(songId.toString()) ?: continue
+            val cached = parseCachedFeatures(json) ?: continue
+            entries.put(songId, cached)
+        }
+        return true
+    }
+
+    private fun parseCachedFeatures(json: JSONObject): CachedFeatures? {
+        val rawTempo = if (json.isNull("tempo_bpm")) null else {
+            json.optDouble("tempo_bpm", Double.NaN).toFloat()
+        }
+        val energy = json.optDouble("energy", Double.NaN).toFloat()
+        val confidence = json.optDouble("tempo_confidence", 0.0).toFloat()
+        if (!energy.isFinite() || !confidence.isFinite()) return null
+        return CachedFeatures(
+            signature = json.optString("signature"),
+            features = LocalAudioFeatures(
+                tempoBpm = rawTempo?.takeIf { it.isFinite() && it in MIN_TEMPO_BPM..MAX_TEMPO_BPM },
+                tempoConfidence = confidence.coerceIn(0f, 1f),
+                energy = energy.coerceIn(0f, 1f),
+                analyzedDurationMs = json.optLong("duration_ms", 0L).coerceAtLeast(0L)
+            )
+        )
+    }
+
+    /** Persist in LRU order as one bounded value instead of retaining one key per track. */
+    private fun encodeCache(): String {
+        val ids = JSONArray()
+        val items = JSONObject()
+        entries.snapshot().forEach { (songId, cached) ->
+            ids.put(songId)
+            items.put(songId.toString(), cached.toJson())
+        }
+        return JSONObject().put("ids", ids).put("items", items).toString()
     }
 
     private fun signature(song: Song): String = listOf(
@@ -83,8 +152,6 @@ class LocalAudioFeatureStore(context: Context) {
         song.dateAddedSeconds,
         song.mimeType
     ).joinToString("|")
-
-    private fun cacheKey(songId: Long) = KEY_PREFIX + songId
 
     private data class CachedFeatures(val signature: String, val features: LocalAudioFeatures) {
         fun toJson(): JSONObject = JSONObject()
@@ -97,7 +164,9 @@ class LocalAudioFeatureStore(context: Context) {
 
     private companion object {
         const val PREFERENCES_NAME = "tunelyst_audio_features"
-        const val KEY_PREFIX = "track_"
+        const val LEGACY_KEY_PREFIX = "track_"
+        const val CACHE_KEY = "bounded_feature_cache_v1"
+        const val MAX_CACHED_FEATURES = 128
         const val MIN_TEMPO_BPM = 45f
         const val MAX_TEMPO_BPM = 220f
     }

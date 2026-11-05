@@ -82,18 +82,23 @@ internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
 }
 
 internal fun MusicPlaybackService.ensureStandbyPlayerImpl(): ExoPlayer {
-    if (!isStandbyPlayerInitialized()) standbyPlayer = createStandbyPlayerImpl()
+    if (standbyPlayerRef == null) standbyPlayerRef = createStandbyPlayerImpl()
     return standbyPlayer
 }
 
 internal fun MusicPlaybackService.createStandbyPlayerImpl(): ExoPlayer {
     val player = createPlayer(handleAudioFocus = false)
-    installListener(player)
-    if (isAudioSettingsInitialized()) {
-        player.setPlaybackParameters(PlaybackParameters(audioSettings.playbackSpeed, audioSettings.playbackPitch))
+    try {
+        installListener(player)
+        if (isAudioSettingsInitialized()) {
+            player.setPlaybackParameters(PlaybackParameters(audioSettings.playbackSpeed, audioSettings.playbackPitch))
+        }
+        standbyPlayerGeneration++
+        return player
+    } catch (failure: Throwable) {
+        releaseDetachedPlayerImpl(player, "standby initialization failed")
+        throw failure
     }
-    standbyPlayerGeneration++
-    return player
 }
 
 /**
@@ -104,6 +109,7 @@ internal fun MusicPlaybackService.createStandbyPlayerImpl(): ExoPlayer {
 internal fun MusicPlaybackService.recycleStandbyPlayerImpl() {
     if (!isStandbyPlayerInitialized()) return
     val oldPlayer = standbyPlayer
+    cancelPendingPlaybackErrorRecoveryImpl(oldPlayer)
     val reused = runCatching {
         oldPlayer.pause()
         oldPlayer.stop()
@@ -126,16 +132,29 @@ internal fun MusicPlaybackService.recycleStandbyPlayerImpl() {
         return
     }
 
-    // Preserve a clean fallback if reset fails, but do not create a replacement on the normal path.
-    val replacement = runCatching { createStandbyPlayerImpl() }
-        .onFailure { Log.w("TunelystPlayback", "Could not recreate the standby player after reset failure", it) }
-        .getOrNull() ?: return
-    standbyPlayer = replacement
+    // The failed player is detached and fully released before the fallback is constructed, so a
+    // reset failure cannot leave two standby instances or stale audio-effect handles alive.
+    standbyPlayerRef = null
     releaseDetachedPlayerImpl(oldPlayer, "standby reset fallback")
+    standbyPlayerRef = runCatching { createStandbyPlayerImpl() }
+        .onFailure { Log.w("TunelystPlayback", "Could not recreate the standby player after reset failure", it) }
+        .getOrNull()
 }
 
-/** Releases all service-owned listener and audio-effect state for a player that is no longer active. */
+internal fun MusicPlaybackService.releaseStandbyPlayerImpl(reason: String) {
+    val target = standbyPlayerRef ?: return
+    standbyPlayerRef = null
+    releaseDetachedPlayerImpl(target, reason)
+}
+
+/** Cancels delayed error recovery because this player is changing roles or being released. */
+internal fun MusicPlaybackService.cancelPendingPlaybackErrorRecoveryImpl(target: ExoPlayer) {
+    pendingPlaybackErrorRecoveries.remove(target)?.let(mainHandler::removeCallbacks)
+}
+
+/** Releases all service-owned listener, buffer, and audio-effect state for a detached player. */
 internal fun MusicPlaybackService.releaseDetachedPlayerImpl(target: ExoPlayer, reason: String) {
+    cancelPendingPlaybackErrorRecoveryImpl(target)
     playerListeners.remove(target)?.let { listener ->
         runCatching { target.removeListener(listener) }
     }
@@ -143,12 +162,19 @@ internal fun MusicPlaybackService.releaseDetachedPlayerImpl(target: ExoPlayer, r
     releaseLoudnessEnhancer(target)
     audioSessionIds.remove(target)
     appliedReplayGainByPlayer.remove(target)
+    runCatching { target.pause() }
+    runCatching { target.stop() }
+    runCatching { target.clearMediaItems() }
     runCatching { target.release() }
         .onFailure { Log.w("TunelystPlayback", "Could not release a detached player ($reason)", it) }
 }
 
 @OptIn(UnstableApi::class)
 internal fun MusicPlaybackService.installListenerImpl(target: ExoPlayer) {
+    // Replace rather than stack service listeners if a recovery path reinitializes a player slot.
+    playerListeners.remove(target)?.let { previous ->
+        runCatching { target.removeListener(previous) }
+    }
     val listener = object : Player.Listener {
         @OptIn(UnstableApi::class)
         override fun onAudioSessionIdChanged(audioSessionId: Int) {
@@ -169,6 +195,7 @@ internal fun MusicPlaybackService.installListenerImpl(target: ExoPlayer) {
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            cancelPendingPlaybackErrorRecoveryImpl(target)
             applyReplayGain(target, mediaItem)
             if (target !== foregroundPlayer) return
             val displayedIncomingId = CrossfadeDisplayState.incomingMediaId.value
@@ -335,9 +362,12 @@ internal fun MusicPlaybackService.recoverPlaybackAfterErrorImpl(target: ExoPlaye
     if (transientReadFailure && failedItemId != null && transientRetryAttemptedMediaId != failedItemId) {
         transientRetryAttemptedMediaId = failedItemId
         val failedIndex = target.currentMediaItemIndex
+        pendingPlaybackErrorRecoveries.remove(target)?.let(mainHandler::removeCallbacks)
         lateinit var retry: Runnable
         retry = Runnable {
-            pendingPlaybackErrorRecoveries.remove(retry)
+            if (pendingPlaybackErrorRecoveries[target] === retry) {
+                pendingPlaybackErrorRecoveries.remove(target)
+            }
             val retryStillApplies = isForegroundPlayerInitialized() && target === foregroundPlayer &&
                 target.currentMediaItemIndex == failedIndex && target.currentMediaItem?.mediaId == failedItemId &&
                 target.playWhenReady && target.playbackState == Player.STATE_IDLE
@@ -346,7 +376,7 @@ internal fun MusicPlaybackService.recoverPlaybackAfterErrorImpl(target: ExoPlaye
                 target.play()
             }
         }
-        pendingPlaybackErrorRecoveries += retry
+        pendingPlaybackErrorRecoveries[target] = retry
         mainHandler.postDelayed(retry, TRANSIENT_PLAYBACK_RETRY_DELAY_MS)
         return
     }

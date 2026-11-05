@@ -38,8 +38,8 @@ android {
         applicationId = "com.tunelyst.music"
         minSdk = 26
         targetSdk = 36
-        versionCode = 75
-        versionName = "1.1.63"
+        versionCode = 76
+        versionName = "1.1.64"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

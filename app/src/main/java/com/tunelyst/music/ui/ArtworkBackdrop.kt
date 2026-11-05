@@ -29,6 +29,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.size.Precision
+
+internal const val ARTWORK_BACKDROP_MAX_SIZE_PX = 640
 
 /** Shared full-screen artwork wash shown behind every app destination. */
 @Composable
@@ -41,7 +44,7 @@ fun GlobalArtworkBackdrop(
     val palette = LocalTunelystPalette.current
     val motionEnabled = LocalTunelystMotionEnabled.current
     val lowMemoryDevice = LocalTunelystLowMemoryDevice.current
-    val context = LocalContext.current
+    val context = LocalContext.current.applicationContext
     val visibleArtwork = artworkUri.takeIf { dynamicBlurEnabled }
     val topShade = if (palette.isLight) 0.52f else 0.26f
     val midShade = if (palette.isLight) 0.70f else 0.53f
@@ -70,6 +73,9 @@ fun GlobalArtworkBackdrop(
                 imageUri?.let {
                     ImageRequest.Builder(context)
                         .data(it)
+                        // Blur hides detail; a fixed decode bound avoids full-display-size bitmaps.
+                        .size(ARTWORK_BACKDROP_MAX_SIZE_PX, ARTWORK_BACKDROP_MAX_SIZE_PX)
+                        .precision(Precision.INEXACT)
                         .allowHardware(!lowMemoryDevice)
                         .bitmapConfig(if (lowMemoryDevice) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                         .crossfade(motionEnabled && !lowMemoryDevice)

@@ -53,7 +53,7 @@ fun AlbumArtwork(
     val palette = remember(title) { CoverPalettes[(title.hashCode().ushr(1)) % CoverPalettes.size] }
     val motionEnabled = LocalTunelystMotionEnabled.current
     val lowMemoryDevice = LocalTunelystLowMemoryDevice.current
-    val context = LocalContext.current
+    val context = LocalContext.current.applicationContext
     val artworkRequest = remember(artworkUri, context, crossfade, motionEnabled, lowMemoryDevice) {
         artworkUri?.let {
             ImageRequest.Builder(context)

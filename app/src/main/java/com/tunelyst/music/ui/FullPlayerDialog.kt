@@ -113,11 +113,15 @@ fun FullPlayerDialog(
     val motionEnabled = LocalTunelystMotionEnabled.current
     val lowMemoryDevice = LocalTunelystLowMemoryDevice.current
     val artworkSwipeThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
-    val dialogContext = LocalContext.current
+    val dialogContext = LocalContext.current.applicationContext
     val ambientArtworkRequest = remember(song.artworkUri, dialogContext, motionEnabled, lowMemoryDevice) {
         song.artworkUri?.let { artworkUri ->
             coil.request.ImageRequest.Builder(dialogContext)
                 .data(artworkUri)
+                // This artwork is a blurred backdrop, so decoding beyond this bound adds memory
+                // without a visible quality benefit.
+                .size(ARTWORK_BACKDROP_MAX_SIZE_PX, ARTWORK_BACKDROP_MAX_SIZE_PX)
+                .precision(coil.size.Precision.INEXACT)
                 .allowHardware(!lowMemoryDevice)
                 .bitmapConfig(if (lowMemoryDevice) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
                 .crossfade(motionEnabled && !lowMemoryDevice)
