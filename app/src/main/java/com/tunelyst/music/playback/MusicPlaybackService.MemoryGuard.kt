@@ -146,6 +146,8 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
     var replacement: ExoPlayer? = null
     var foregroundDetached = false
     var oldListenerDetached = false
+    var foregroundSwapped = false
+    var sessionSwapped = false
     var oldPlayerReleased = false
 
     fun restoreReleasedPlayer(target: ExoPlayer): Boolean = runCatching {
@@ -173,20 +175,17 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         // path cannot keep a second allocator/effect set alive under memory pressure.
         if (isStandbyPlayerInitialized()) releaseStandbyPlayerImpl("memory recovery")
 
-        // Tear down and release the foreground instance before creating its replacement. Keep only
-        // the small immutable queue/state snapshot so peak player, decoder, buffer, and effect memory
-        // does not overlap during this emergency recovery.
+        // Stop the old player and clear the service slot before replacement. stop() resets its
+        // allocator/renderer state; keep the stopped playlist attached until the MediaSession has
+        // switched to avoid publishing a transient empty queue to connected controllers.
         oldPlayer.pause()
         oldPlayer.stop()
-        oldPlayer.clearMediaItems()
         playerListeners.remove(oldPlayer)?.let { listener ->
             runCatching { oldPlayer.removeListener(listener) }
             oldListenerDetached = true
         }
         foregroundPlayerRef = null
         foregroundDetached = true
-        releaseDetachedPlayerImpl(oldPlayer, "memory recovery")
-        oldPlayerReleased = true
 
         replacement = createPlayer(handleAudioFocus = true)
         installListener(replacement)
@@ -203,7 +202,15 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         // new listening session in the ViewModel.
         foregroundPlayerRef = replacement
         foregroundPlayerGeneration = previousForegroundGeneration + 1
+        foregroundSwapped = true
         mediaSession.setPlayer(createSessionPlayer(replacement))
+        sessionSwapped = true
+
+        // Release the stopped player immediately after the MediaSession handoff and before the new
+        // player prepares a decoder. This avoids stale-session callbacks and keeps decoder overlap low.
+        releaseDetachedPlayerImpl(oldPlayer, "memory recovery")
+        oldPlayerReleased = true
+
         replacement.prepare()
         if (resumePlayback) replacement.play() else replacement.pause()
         unexpectedPauseStartedAtElapsedMs = 0L
@@ -225,10 +232,16 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         val failedReplacement = replacement
         if (!oldPlayerReleased) {
             if (foregroundDetached) foregroundPlayerRef = oldPlayer
+            if (foregroundSwapped) foregroundPlayerGeneration = previousForegroundGeneration
+            if (sessionSwapped || foregroundSwapped) {
+                runCatching { mediaSession.setPlayer(createSessionPlayer(oldPlayer)) }
+                    .onFailure { Log.e("TunelystPlayback", "Could not restore the MediaSession to the previous player", it) }
+            }
             if (oldListenerDetached) {
                 runCatching { installListener(oldPlayer) }
                     .onFailure { Log.e("TunelystPlayback", "Could not restore the foreground player listener", it) }
             }
+            failedReplacement?.let { releaseDetachedPlayerImpl(it, "failed memory recovery replacement") }
             runCatching {
                 oldPlayer.setMediaItems(queue, currentIndex, currentPositionMs)
                 oldPlayer.setShuffleOrder(shuffleOrder)

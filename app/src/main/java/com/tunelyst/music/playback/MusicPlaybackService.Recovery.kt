@@ -37,6 +37,10 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
         "crossfade=$crossfading/$crossfadeKind;" +
         "source=${source.currentMediaItem?.mediaId}/${source.currentMediaItemIndex}/" +
         "${source.playbackState}/${source.playWhenReady}/${source.isPlaying}/${source.currentPosition};" +
+        "sourceQueue=${(0 until source.mediaItemCount).map { source.getMediaItemAt(it).mediaId }};" +
+        "repeat=${source.repeatMode};shuffle=${source.shuffleModeEnabled};" +
+        "playbackParameters=${source.playbackParameters};" +
+        "trackSelection=${source.trackSelectionParameters};" +
         "standby=$standbyState;fade=$manualFadeElapsedMs/$fadeDurationMs;" +
         "started=$manualFadeStartedAtElapsedMs;timeout=${manualTransitionTimeout != null};" +
         "prepared=$preparedNextIndex;sessions=${audioSessionIds[source] ?: 0}/$standbySessionId;" +

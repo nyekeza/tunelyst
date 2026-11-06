@@ -174,9 +174,9 @@ class PlaybackTransitionInstrumentedTest {
         val settings = AudioSettingsStore(context)
         val originalSettings = settings.read()
         val wavFiles = listOf(
-            createWaveFile(context.cacheDir, "memory-guard-0", 261.63),
-            createWaveFile(context.cacheDir, "memory-guard-1", 329.63),
-            createWaveFile(context.cacheDir, "memory-guard-2", 392.00)
+            createWaveFile(context.cacheDir, "memory-guard-0", 261.63, durationSeconds = 180, sampleRate = 16_000),
+            createWaveFile(context.cacheDir, "memory-guard-1", 329.63, durationSeconds = 180, sampleRate = 16_000),
+            createWaveFile(context.cacheDir, "memory-guard-2", 392.00, durationSeconds = 180, sampleRate = 16_000)
         )
         settings.setCrossfadeSeconds(0)
         settings.setManualSkipFadeSeconds(0)
@@ -254,10 +254,17 @@ class PlaybackTransitionInstrumentedTest {
                 }
             }
             val positionBeforeRecycle = currentPosition(instrumentation, connectedController)
-            val (currentIndexBeforeRecycle, queueIdsBeforeRecycle) = runOnMainSync(instrumentation) {
-                connectedController.currentMediaItemIndex to
-                    (0 until connectedController.mediaItemCount).map { connectedController.getMediaItemAt(it).mediaId }
+            val recycleSnapshot = runOnMainSync(instrumentation) {
+                Triple(
+                    connectedController.currentMediaItemIndex,
+                    (0 until connectedController.mediaItemCount).map { connectedController.getMediaItemAt(it).mediaId },
+                    connectedController.currentMediaItem?.mediaId
+                        ?: error("memory-guard source media item disappeared before replacement")
+                )
             }
+            val currentIndexBeforeRecycle = recycleSnapshot.first
+            val queueIdsBeforeRecycle = recycleSnapshot.second
+            val currentMediaIdBeforeRecycle = recycleSnapshot.third
             val initialDebugState = transitionDebugState(instrumentation, connectedController)
             val initialRecycleCount = memoryRecycleCount(initialDebugState)
             val initialForegroundGeneration = foregroundPlayerGeneration(initialDebugState)
@@ -278,12 +285,26 @@ class PlaybackTransitionInstrumentedTest {
             awaitCondition(
                 instrumentation,
                 "memory-guard replacement did not restore the active session",
-                diagnostics = { "service=${transitionDebugState(instrumentation, connectedController)}" },
+                diagnostics = {
+                    val controllerState = runOnMainSync(instrumentation) {
+                        "mediaId=${connectedController.currentMediaItem?.mediaId}, " +
+                            "index=${connectedController.currentMediaItemIndex}, " +
+                            "position=${connectedController.currentPosition}, " +
+                            "items=${(0 until connectedController.mediaItemCount).map { connectedController.getMediaItemAt(it).mediaId }}, " +
+                            "playWhenReady=${connectedController.playWhenReady}, isPlaying=${connectedController.isPlaying}, " +
+                            "playbackState=${connectedController.playbackState}, repeat=${connectedController.repeatMode}, " +
+                            "shuffle=${connectedController.shuffleModeEnabled}, " +
+                            "parameters=${connectedController.playbackParameters}, " +
+                            "trackSelection=${connectedController.trackSelectionParameters.disabledTrackTypes}, " +
+                            "expectedTrackSelection=${expectedTrackSelectionParameters.get()?.disabledTrackTypes}"
+                    }
+                    "$controllerState, service=${transitionDebugState(instrumentation, connectedController)}"
+                },
                 timeoutMs = 20_000L
             ) {
                 val state = transitionDebugState(instrumentation, connectedController)
                 runOnMainSync(instrumentation) {
-                    connectedController.currentMediaItem?.mediaId == "memory-guard-0" &&
+                    connectedController.currentMediaItem?.mediaId == currentMediaIdBeforeRecycle &&
                         connectedController.currentMediaItemIndex == currentIndexBeforeRecycle &&
                         connectedController.isPlaying && connectedController.mediaItemCount == queueIdsBeforeRecycle.size &&
                         (0 until connectedController.mediaItemCount).map { connectedController.getMediaItemAt(it).mediaId } ==
@@ -330,9 +351,9 @@ class PlaybackTransitionInstrumentedTest {
         val settings = AudioSettingsStore(context)
         val originalSettings = settings.read()
         val wavFiles = listOf(
-            createWaveFile(context.cacheDir, "transition-source", 261.63),
-            createWaveFile(context.cacheDir, "transition-next", 329.63),
-            createWaveFile(context.cacheDir, "transition-selected", 392.00)
+            createWaveFile(context.cacheDir, "transition-source", 261.63, durationSeconds = 180, sampleRate = 16_000),
+            createWaveFile(context.cacheDir, "transition-next", 329.63, durationSeconds = 180, sampleRate = 16_000),
+            createWaveFile(context.cacheDir, "transition-selected", 392.00, durationSeconds = 180, sampleRate = 16_000)
         )
         // Configure service-owned preferences before requesting the service; otherwise a fast
         // emulator can create the service with the old settings before the test writes them.
@@ -373,7 +394,7 @@ class PlaybackTransitionInstrumentedTest {
                 instrumentation,
                 "source track or its next queue item did not become available",
                 diagnostics = {
-                    runOnMainSync(instrumentation) {
+                    val controllerState = runOnMainSync(instrumentation) {
                         "id=${activeController.currentMediaItem?.mediaId}, " +
                             "playWhenReady=${activeController.playWhenReady}, " +
                             "isPlaying=${activeController.isPlaying}, " +
@@ -383,6 +404,7 @@ class PlaybackTransitionInstrumentedTest {
                             "currentIndex=${activeController.currentMediaItemIndex}, " +
                             "nextIndex=${activeController.nextMediaItemIndex}"
                     }
+                    "$controllerState, service=${transitionDebugState(instrumentation, activeController)}"
                 }
             ) {
                 runOnMainSync(instrumentation) {
