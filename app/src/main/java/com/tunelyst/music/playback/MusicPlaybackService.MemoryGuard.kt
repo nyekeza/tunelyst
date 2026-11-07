@@ -107,19 +107,38 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
     reason: String,
     memoryBefore: PlaybackMemorySample
 ): Boolean {
-    if (!isForegroundPlayerInitialized()) return false
+    if (!isForegroundPlayerInitialized()) {
+        memoryGuardLastDecision = "rejected:no-foreground"
+        return false
+    }
     val oldPlayer = foregroundPlayer
     val hasPendingStandbyResources = isStandbyPlayerInitialized() &&
         (standbyPlayer.mediaItemCount > 0 || standbyPlayer.playbackState != Player.STATE_IDLE)
-    if (!oldPlayer.playWhenReady || !oldPlayer.isPlaying || oldPlayer.currentMediaItem == null ||
-        oldPlayer.mediaItemCount == 0 || crossfading || pendingManualTransition != null ||
-        activeManualTransition != null || preparedNextIndex != C.INDEX_UNSET ||
-        crossfadeCancelRestoreStartVolume != null || sleepTimerFadeActive || hasPendingStandbyResources
-    ) return false
+    val rejectionReasons = listOfNotNull(
+        if (!oldPlayer.playWhenReady) "playWhenReady=false" else null,
+        if (!oldPlayer.isPlaying) "isPlaying=false" else null,
+        if (oldPlayer.currentMediaItem == null) "no-current-item" else null,
+        if (oldPlayer.mediaItemCount == 0) "empty-queue" else null,
+        if (crossfading) "crossfading" else null,
+        if (pendingManualTransition != null) "pending-manual-transition" else null,
+        if (activeManualTransition != null) "active-manual-transition" else null,
+        if (preparedNextIndex != C.INDEX_UNSET) "prepared-next-index=$preparedNextIndex" else null,
+        if (crossfadeCancelRestoreStartVolume != null) "restoring-crossfade-volume" else null,
+        if (sleepTimerFadeActive) "sleep-timer-fade" else null,
+        if (hasPendingStandbyResources) "standby-has-resources" else null
+    )
+    if (rejectionReasons.isNotEmpty()) {
+        memoryGuardLastDecision = "rejected:${rejectionReasons.joinToString(",")}"
+        return false
+    }
 
     val mediaItemCount = oldPlayer.mediaItemCount
     val currentIndex = oldPlayer.currentMediaItemIndex
-    if (currentIndex !in 0 until mediaItemCount) return false
+    if (currentIndex !in 0 until mediaItemCount) {
+        memoryGuardLastDecision = "rejected:invalid-index=$currentIndex/count=$mediaItemCount"
+        return false
+    }
+    memoryGuardLastDecision = "eligible"
 
     // Snapshot the complete player state before stop/release. MediaItem objects contain the local
     // URIs and metadata needed to rebuild the same queue without involving the network or catalog.
@@ -146,6 +165,8 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
     var replacement: ExoPlayer? = null
     var foregroundDetached = false
     var oldListenerDetached = false
+    var foregroundSwapped = false
+    var sessionSwapped = false
     var oldPlayerReleased = false
 
     fun restoreReleasedPlayer(target: ExoPlayer): Boolean = runCatching {
@@ -173,20 +194,17 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         // path cannot keep a second allocator/effect set alive under memory pressure.
         if (isStandbyPlayerInitialized()) releaseStandbyPlayerImpl("memory recovery")
 
-        // Tear down and release the foreground instance before creating its replacement. Keep only
-        // the small immutable queue/state snapshot so peak player, decoder, buffer, and effect memory
-        // does not overlap during this emergency recovery.
+        // Stop the old player and clear the service slot before replacement. stop() resets its
+        // allocator/renderer state; keep the stopped playlist attached until the MediaSession has
+        // switched to avoid publishing a transient empty queue to connected controllers.
         oldPlayer.pause()
         oldPlayer.stop()
-        oldPlayer.clearMediaItems()
         playerListeners.remove(oldPlayer)?.let { listener ->
             runCatching { oldPlayer.removeListener(listener) }
             oldListenerDetached = true
         }
         foregroundPlayerRef = null
         foregroundDetached = true
-        releaseDetachedPlayerImpl(oldPlayer, "memory recovery")
-        oldPlayerReleased = true
 
         replacement = createPlayer(handleAudioFocus = true)
         installListener(replacement)
@@ -203,7 +221,15 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
         // new listening session in the ViewModel.
         foregroundPlayerRef = replacement
         foregroundPlayerGeneration = previousForegroundGeneration + 1
+        foregroundSwapped = true
         mediaSession.setPlayer(createSessionPlayer(replacement))
+        sessionSwapped = true
+
+        // Release the stopped player immediately after the MediaSession handoff and before the new
+        // player prepares a decoder. This avoids stale-session callbacks and keeps decoder overlap low.
+        releaseDetachedPlayerImpl(oldPlayer, "memory recovery")
+        oldPlayerReleased = true
+
         replacement.prepare()
         if (resumePlayback) replacement.play() else replacement.pause()
         unexpectedPauseStartedAtElapsedMs = 0L
@@ -219,16 +245,24 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
                 "totalPss=${memoryAfter.totalPssBytes}, pressure=${memoryAfter.pressureBytes}, " +
                 "generation=$foregroundPlayerGeneration"
         )
+        memoryGuardLastDecision = "replaced"
         return true
     } catch (failure: Throwable) {
+        memoryGuardLastDecision = "replacement-error:${failure.javaClass.simpleName}"
         Log.e("TunelystPlayback", "Foreground ExoPlayer replacement failed ($reason)", failure)
         val failedReplacement = replacement
         if (!oldPlayerReleased) {
             if (foregroundDetached) foregroundPlayerRef = oldPlayer
+            if (foregroundSwapped) foregroundPlayerGeneration = previousForegroundGeneration
+            if (sessionSwapped || foregroundSwapped) {
+                runCatching { mediaSession.setPlayer(createSessionPlayer(oldPlayer)) }
+                    .onFailure { Log.e("TunelystPlayback", "Could not restore the MediaSession to the previous player", it) }
+            }
             if (oldListenerDetached) {
                 runCatching { installListener(oldPlayer) }
                     .onFailure { Log.e("TunelystPlayback", "Could not restore the foreground player listener", it) }
             }
+            failedReplacement?.let { releaseDetachedPlayerImpl(it, "failed memory recovery replacement") }
             runCatching {
                 oldPlayer.setMediaItems(queue, currentIndex, currentPositionMs)
                 oldPlayer.setShuffleOrder(shuffleOrder)
@@ -259,6 +293,7 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
                 }
             }
             if (recovered) {
+                memoryGuardLastDecision = "recovered-after-error"
                 val memoryAfter = readPlaybackMemorySample()
                 recordPlaybackMemorySample(memoryAfter)
                 memoryGuardRecoveryBaselinePressureBytes = memoryAfter.pressureBytes
