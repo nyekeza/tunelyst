@@ -278,9 +278,15 @@ class PlaybackTransitionInstrumentedTest {
                     )
                 )
             }
+            val recycleResult = recycleFuture.get().get(15, TimeUnit.SECONDS)
+            val afterRecycleDebugState = runCatching {
+                transitionDebugState(instrumentation, connectedController)
+            }.getOrElse { "unavailable:${it.javaClass.simpleName}:${it.message}" }
             assertEquals(
+                "Memory-guard command failed with result=${recycleResult.resultCode}; " +
+                    "before=$initialDebugState; after=$afterRecycleDebugState",
                 SessionResult.RESULT_SUCCESS,
-                recycleFuture.get().get(15, TimeUnit.SECONDS).resultCode
+                recycleResult.resultCode
             )
             awaitCondition(
                 instrumentation,
@@ -568,8 +574,10 @@ class PlaybackTransitionInstrumentedTest {
             val initialAutomaticGeneration = standbyGeneration(
                 transitionDebugState(instrumentation, activeController)
             )
+            // The generated fixture is 180 seconds long; leave 7 seconds so the 4-second fade
+            // window is reached with time for the standby player to prepare.
             runOnMainSync(instrumentation) {
-                activeController.seekTo(activeController.currentMediaItemIndex, 23_000L)
+                activeController.seekTo(activeController.currentMediaItemIndex, 173_000L)
             }
             awaitCondition(
                 instrumentation,
@@ -597,7 +605,7 @@ class PlaybackTransitionInstrumentedTest {
             assertAudioEffectsDetached(instrumentation, activeController)
 
             runOnMainSync(instrumentation) {
-                activeController.seekTo(activeController.currentMediaItemIndex, 23_000L)
+                activeController.seekTo(activeController.currentMediaItemIndex, 173_000L)
             }
             awaitCondition(
                 instrumentation,

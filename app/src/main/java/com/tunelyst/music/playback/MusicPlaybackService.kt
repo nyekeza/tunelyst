@@ -72,6 +72,7 @@ class MusicPlaybackService : MediaSessionService() {
     internal var memoryGuardLastPressureBytes = 0L
     internal var memoryGuardRecoveryAttemptCount = 0
     internal var memoryGuardRecycleCount = 0
+    internal var memoryGuardLastDecision = "not-attempted"
 
     internal fun isForegroundPlayerInitialized(): Boolean = foregroundPlayerRef != null
     internal fun isStandbyPlayerInitialized(): Boolean = standbyPlayerRef != null

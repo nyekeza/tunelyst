@@ -107,19 +107,38 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
     reason: String,
     memoryBefore: PlaybackMemorySample
 ): Boolean {
-    if (!isForegroundPlayerInitialized()) return false
+    if (!isForegroundPlayerInitialized()) {
+        memoryGuardLastDecision = "rejected:no-foreground"
+        return false
+    }
     val oldPlayer = foregroundPlayer
     val hasPendingStandbyResources = isStandbyPlayerInitialized() &&
         (standbyPlayer.mediaItemCount > 0 || standbyPlayer.playbackState != Player.STATE_IDLE)
-    if (!oldPlayer.playWhenReady || !oldPlayer.isPlaying || oldPlayer.currentMediaItem == null ||
-        oldPlayer.mediaItemCount == 0 || crossfading || pendingManualTransition != null ||
-        activeManualTransition != null || preparedNextIndex != C.INDEX_UNSET ||
-        crossfadeCancelRestoreStartVolume != null || sleepTimerFadeActive || hasPendingStandbyResources
-    ) return false
+    val rejectionReasons = listOfNotNull(
+        if (!oldPlayer.playWhenReady) "playWhenReady=false" else null,
+        if (!oldPlayer.isPlaying) "isPlaying=false" else null,
+        if (oldPlayer.currentMediaItem == null) "no-current-item" else null,
+        if (oldPlayer.mediaItemCount == 0) "empty-queue" else null,
+        if (crossfading) "crossfading" else null,
+        if (pendingManualTransition != null) "pending-manual-transition" else null,
+        if (activeManualTransition != null) "active-manual-transition" else null,
+        if (preparedNextIndex != C.INDEX_UNSET) "prepared-next-index=$preparedNextIndex" else null,
+        if (crossfadeCancelRestoreStartVolume != null) "restoring-crossfade-volume" else null,
+        if (sleepTimerFadeActive) "sleep-timer-fade" else null,
+        if (hasPendingStandbyResources) "standby-has-resources" else null
+    )
+    if (rejectionReasons.isNotEmpty()) {
+        memoryGuardLastDecision = "rejected:${rejectionReasons.joinToString(",")}"
+        return false
+    }
 
     val mediaItemCount = oldPlayer.mediaItemCount
     val currentIndex = oldPlayer.currentMediaItemIndex
-    if (currentIndex !in 0 until mediaItemCount) return false
+    if (currentIndex !in 0 until mediaItemCount) {
+        memoryGuardLastDecision = "rejected:invalid-index=$currentIndex/count=$mediaItemCount"
+        return false
+    }
+    memoryGuardLastDecision = "eligible"
 
     // Snapshot the complete player state before stop/release. MediaItem objects contain the local
     // URIs and metadata needed to rebuild the same queue without involving the network or catalog.
@@ -226,8 +245,10 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
                 "totalPss=${memoryAfter.totalPssBytes}, pressure=${memoryAfter.pressureBytes}, " +
                 "generation=$foregroundPlayerGeneration"
         )
+        memoryGuardLastDecision = "replaced"
         return true
     } catch (failure: Throwable) {
+        memoryGuardLastDecision = "replacement-error:${failure.javaClass.simpleName}"
         Log.e("TunelystPlayback", "Foreground ExoPlayer replacement failed ($reason)", failure)
         val failedReplacement = replacement
         if (!oldPlayerReleased) {
@@ -272,6 +293,7 @@ private fun MusicPlaybackService.replaceForegroundPlayerForMemoryPressureImpl(
                 }
             }
             if (recovered) {
+                memoryGuardLastDecision = "recovered-after-error"
                 val memoryAfter = readPlaybackMemorySample()
                 recordPlaybackMemorySample(memoryAfter)
                 memoryGuardRecoveryBaselinePressureBytes = memoryAfter.pressureBytes

@@ -52,7 +52,8 @@ internal fun MusicPlaybackService.manualTransitionDebugStateImpl(): String {
         "memoryNativeAllocated=$memoryGuardLastNativeAllocatedBytes;" +
         "memoryPressure=$memoryGuardLastPressureBytes;" +
         "memoryRecoveryBaseline=$memoryGuardRecoveryBaselinePressureBytes;" +
-        "memoryLastAttemptElapsed=$memoryGuardLastRecoveryAttemptElapsedMs"
+        "memoryLastAttemptElapsed=$memoryGuardLastRecoveryAttemptElapsedMs;" +
+        "memoryDecision=$memoryGuardLastDecision"
 }
 
 internal fun MusicPlaybackService.recoverUnexpectedReadyPauseImpl() {
